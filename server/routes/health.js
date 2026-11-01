@@ -2,7 +2,7 @@ import createError from 'http-errors';
 import open from 'open';
 import { Router } from 'express';
 import sharp from 'sharp';
-import { BIN, DOTENV, LLM, ROOT, SERVER, WHISPER_LANGUAGE, WHISPER_MODEL, WORKDIR } from '../config.js';
+import { BIN, DOTENV, LLM, ROOT, SERVER, VIDEO_AUDIO_SOURCE, VIDEO_TTS_VOICE, WHISPER_LANGUAGE, WHISPER_MODEL, WORKDIR } from '../config.js';
 import { readLogTail } from '../logger.js';
 import { incompleteBlobs, llmStatus, modelCacheDir, modelCached, sttReady } from '../stt.js';
 
@@ -18,6 +18,8 @@ router.get('/health', (req, res) => {
     ffmpeg: BIN.ffmpeg,
     ffprobe: BIN.ffprobe,
     chrome: BIN.chrome,
+    say: BIN.say,
+    video: { audioSource: VIDEO_AUDIO_SOURCE, ttsVoice: VIDEO_TTS_VOICE },
     stt: { ready: sttReady(), engine: 'mlx-whisper' },
     llm: LLM.publicInfo,
     env: DOTENV ? { file: '.env', keys: DOTENV.keys.length } : null,

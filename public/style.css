@@ -306,6 +306,33 @@ body {
   cursor: default;
 }
 
+.audio-source {
+  flex: none;
+  margin-left: auto;
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 6px 26px 6px 12px;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+
+.audio-source:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.audio-source option:disabled {
+  color: #c0c6cf;
+}
+
 /* ---------- 列表 ---------- */
 
 .list {

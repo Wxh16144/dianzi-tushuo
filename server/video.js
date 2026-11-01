@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execa } from 'execa';
 import sharp from 'sharp';
-import { BIN, DATA_DIR, TMP_DIR, VIDEO, VIDEO_CACHE_DIR, VIDEO_DIR } from './config.js';
+import { BIN, DATA_DIR, TMP_DIR, TTS_CACHE_DIR, VIDEO, VIDEO_CACHE_DIR, VIDEO_DIR } from './config.js';
 import { ensureDirs } from './db.js';
 import { log } from './logger.js';
 import { probeDuration } from './media.js';
@@ -26,7 +26,10 @@ function hashStr(input) {
 
 /** 视频配置签名：配置变了，缓存就失效 */
 function cfgSig(cfg) {
-  return [cfg.width, cfg.height, cfg.fps, cfg.secondsPerImage, cfg.transSeconds, cfg.burnText ? 1 : 0, cfg.fontFamily].join('|');
+  return [
+    cfg.width, cfg.height, cfg.fps, cfg.secondsPerImage, cfg.transSeconds,
+    cfg.burnText ? 1 : 0, cfg.fontFamily, cfg.audioSource, cfg.ttsVoice,
+  ].join('|');
 }
 
 /** 进度条签名：进度条内容/位置变了，缓存就失效 */
@@ -64,6 +67,37 @@ async function fileSig(absPath) {
   } catch {
     return null;
   }
+}
+
+/** 语音来源：auto 时按「有录音用录音，无录音用 TTS」决策（纯函数） */
+export function resolveAudioSource(audioSource, hasRecording) {
+  if (audioSource === 'recording') return 'recording';
+  if (audioSource === 'tts') return 'tts';
+  return hasRecording ? 'recording' : 'tts';
+}
+
+/** TTS 读什么：文案优先，无文案读标题，都空返回 null（纯函数） */
+export function ttsTextFor(item) {
+  const text = String(item?.text ?? '').trim();
+  if (text) return text;
+  const title = String(item?.title ?? '').trim();
+  return title || null;
+}
+
+/**
+ * 用 macOS say 生成 TTS 音频，按 voice+text 缓存到 data/cache/tts/。
+ * 返回缓存文件路径；无 say 命令或内容为空返回 null。
+ */
+export async function ensureTts(text, voice = 'Tingting') {
+  const content = String(text ?? '').trim();
+  if (!content || !BIN.say) return null;
+  const key = hashStr([voice, content].join('\n'));
+  const outPath = path.join(TTS_CACHE_DIR, `${key}.m4a`);
+  if (fs.existsSync(outPath)) return outPath;
+
+  await ensureDirs();
+  await execa(BIN.say, ['-v', voice, '-o', outPath, content], { timeout: 60_000 });
+  return outPath;
 }
 
 /* ---------------- 纯函数（便于单测） ---------------- */
@@ -860,13 +894,16 @@ async function buildTitleClip({ title, subtitle, cfg, tmpDir, cacheDir }) {
  * 传入 itemId 时只导出那一个条目（覆盖同名文件，不清空目录）。
  * 完整导出会先清空 exports/videos（视频是可再生的），避免旧文件堆积。
  */
-export async function buildVideos({ state, config: configOverride, mode: modeInput, itemId } = {}) {
+export async function buildVideos({ state, config: configOverride, mode: modeInput, itemId, audioSource } = {}) {
   await ensureDirs();
   if (!BIN.ffmpeg) {
     throw badRequest('未找到 ffmpeg，无法生成视频。请安装 ffmpeg 或设置 FFMPEG_PATH', 503);
   }
 
-  const cfg = configOverride ?? VIDEO;
+  const baseCfg = configOverride ?? VIDEO;
+  // 前端可覆盖音频来源；非法值回退到配置默认
+  const source = ['auto', 'recording', 'tts'].includes(audioSource) ? audioSource : baseCfg.audioSource;
+  const cfg = { ...baseCfg, audioSource: source };
 
   const single = itemId ? findItemWithSection(state, itemId) : null;
   if (itemId && !single) {
@@ -917,10 +954,25 @@ export async function buildVideos({ state, config: configOverride, mode: modeInp
           continue;
         }
 
+        // 解析语音来源：录音 / TTS / 静音
         let audioPath = null;
-        if (item.audio) {
-          if (exists(item.audio)) audioPath = abs(item.audio);
-          else missing.add(item.audio);
+        let audioRel = null;
+        const recordingPath = item.audio ? (exists(item.audio) ? abs(item.audio) : null) : null;
+        if (item.audio && !recordingPath) missing.add(item.audio);
+
+        const source = resolveAudioSource(cfg.audioSource, Boolean(recordingPath));
+        if (source === 'recording' && recordingPath) {
+          audioPath = recordingPath;
+          audioRel = item.audio;
+        } else if (source === 'tts') {
+          const spoken = ttsTextFor(item);
+          if (spoken) {
+            const ttsPath = await ensureTts(spoken, cfg.ttsVoice);
+            if (ttsPath) {
+              audioPath = ttsPath;
+              audioRel = `tts/${path.basename(ttsPath)}`;
+            }
+          }
         }
 
         const title = (item.title || '').trim();
@@ -930,7 +982,7 @@ export async function buildVideos({ state, config: configOverride, mode: modeInp
           imagePaths,
           imageRels: item.images,
           audioPath,
-          audioRel: item.audio,
+          audioRel,
           visibleIndex,
           progressLabel: title || String(visibleIndex + 1).padStart(2, '0'),
           titleText: title || `第 ${visibleIndex + 1} 项`,

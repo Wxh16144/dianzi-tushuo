@@ -32,6 +32,10 @@ const S = {
   exportingItem: null,
   saveError: false,
   importing: false,
+  /** 视频语音来源：auto / recording / tts（由 health 接口的默认值初始化） */
+  audioSource: 'auto',
+  /** 是否支持 TTS 配音（有 macOS say 命令） */
+  ttsReady: false,
 };
 
 const dom = {
@@ -622,6 +626,26 @@ function renderTabs() {
     add.type = 'button';
     add.addEventListener('click', addSection);
     dom.tabs.append(add);
+
+    // 视频语音来源选择（auto / 录音 / TTS）
+    const audioSelect = el('select', 'audio-source');
+    audioSelect.title = '视频配音来源';
+    const options = [
+      ['auto', '配音：自动'],
+      ['recording', '配音：录音'],
+      ['tts', '配音：TTS'],
+    ];
+    for (const [value, label] of options) {
+      const opt = el('option', null, label);
+      opt.value = value;
+      if (value === 'tts' && !S.ttsReady) opt.disabled = true;
+      audioSelect.append(opt);
+    }
+    audioSelect.value = S.audioSource;
+    audioSelect.addEventListener('change', () => {
+      S.audioSource = audioSelect.value;
+    });
+    dom.tabs.append(audioSelect);
 
     const tabExport = el('button', 'tab-export', '⏺ 导出视频');
     tabExport.type = 'button';
@@ -1802,7 +1826,7 @@ async function exportVideo({ mode, itemId, toastStart }) {
     const res = await fetch('/api/export/video', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode, itemId }),
+      body: JSON.stringify({ mode, itemId, audioSource: S.audioSource }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `导出失败 (HTTP ${res.status})`);
@@ -2330,6 +2354,12 @@ async function checkHealth() {
     }
     if (!health.chrome) {
       toast('未检测到 Chrome/Chromium：导出 PDF 会失败，请设置 CHROME_PATH', 'error', 12000);
+    }
+
+    // 视频语音来源：用服务端 .env 的默认值初始化，TTS 不可用时禁用 TTS 选项
+    S.ttsReady = Boolean(health.say);
+    if (health.video?.audioSource && ['auto', 'recording', 'tts'].includes(health.video.audioSource)) {
+      S.audioSource = health.video.audioSource;
     }
   } catch {
     /* 忽略 */

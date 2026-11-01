@@ -65,6 +65,7 @@ const EnvSchema = z.object({
   CHROME_PATH: optionalPath,
   FFMPEG_PATH: optionalPath,
   FFPROBE_PATH: optionalPath,
+  SAY_PATH: optionalPath,
 
   WHISPER_BIN: optionalPath,
   WHISPER_MODEL: z.string().min(1).default('mlx-community/whisper-large-v3-turbo'),
@@ -78,6 +79,10 @@ const EnvSchema = z.object({
   VIDEO_TRANS_SECONDS: z.coerce.number().nonnegative().default(0.5),
   VIDEO_BURN_TEXT: envBool(true),
   VIDEO_FONT_FAMILY: optionalPath,
+  /** 视频语音来源：auto（有录音用录音，无录音用 TTS）/ recording（只用录音）/ tts（只用 TTS） */
+  VIDEO_AUDIO_SOURCE: z.enum(['auto', 'recording', 'tts']).default('auto'),
+  /** macOS 系统 TTS 语音名（say -v 名称），默认婷婷 */
+  VIDEO_TTS_VOICE: z.string().min(1).default('Tingting'),
 
   LLM_PROVIDER: z.enum(['ollama', 'lmstudio', 'deepseek', 'openai', 'custom']).default('ollama'),
   LLM_BASE_URL: optionalPath,
@@ -112,8 +117,10 @@ export const EXPORTS_DIR = env.EXPORTS_DIR ? path.resolve(WORKDIR, env.EXPORTS_D
 export const VIDEO_DIR = path.join(EXPORTS_DIR, 'videos');
 /** item 级视频片段缓存（跨请求复用，不会被启动清理） */
 export const VIDEO_CACHE_DIR = path.join(CACHE_DIR, 'videos');
+/** macOS TTS 音频缓存（按 voice+text 复用） */
+export const TTS_CACHE_DIR = path.join(CACHE_DIR, 'tts');
 
-export const ALL_DIRS = [DATA_DIR, IMAGES_DIR, AUDIO_DIR, TMP_DIR, CACHE_DIR, VIDEO_CACHE_DIR, LOG_DIR, EXPORTS_DIR, VIDEO_DIR];
+export const ALL_DIRS = [DATA_DIR, IMAGES_DIR, AUDIO_DIR, TMP_DIR, CACHE_DIR, VIDEO_CACHE_DIR, TTS_CACHE_DIR, LOG_DIR, EXPORTS_DIR, VIDEO_DIR];
 
 /* ---------------- 可执行文件 ---------------- */
 
@@ -167,6 +174,7 @@ export const BIN = {
     path.join(HOME, 'Library/Python/3.13/bin/mlx_whisper'),
     path.join(HOME, 'Library/Python/3.12/bin/mlx_whisper'),
   ], ['mlx_whisper', 'mlx-whisper']),
+  say: resolveBin('SAY_PATH', env.SAY_PATH, ['/usr/bin/say'], ['say']),
 };
 
 /* ---------------- LLM ---------------- */
@@ -250,11 +258,14 @@ export function resolveVideoConfig({
   transSeconds = 0.5,
   burnText = true,
   fontFamily = '',
+  audioSource = 'auto',
+  ttsVoice = 'Tingting',
 } = {}) {
   const clamp = (value, lo, hi, fallback) => {
     const n = Number(value);
     return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
   };
+  const source = ['auto', 'recording', 'tts'].includes(audioSource) ? audioSource : 'auto';
   return {
     width: Math.round(clamp(width, 320, 4096, 1080)),
     height: Math.round(clamp(height, 320, 4096, 1920)),
@@ -263,6 +274,8 @@ export function resolveVideoConfig({
     transSeconds: clamp(transSeconds, 0, 5, 0.5),
     burnText: burnText !== false,
     fontFamily: String(fontFamily || '').trim() || DEFAULT_CJK_FONT_FAMILY,
+    audioSource: source,
+    ttsVoice: String(ttsVoice || '').trim() || 'Tingting',
   };
 }
 
@@ -304,7 +317,12 @@ export const VIDEO = resolveVideoConfig({
   transSeconds: env.VIDEO_TRANS_SECONDS,
   burnText: env.VIDEO_BURN_TEXT,
   fontFamily: env.VIDEO_FONT_FAMILY,
+  audioSource: env.VIDEO_AUDIO_SOURCE,
+  ttsVoice: env.VIDEO_TTS_VOICE,
 });
+
+export const VIDEO_AUDIO_SOURCE = VIDEO.audioSource;
+export const VIDEO_TTS_VOICE = VIDEO.ttsVoice;
 
 export const SERVER = {
   port: env.PORT,
@@ -341,6 +359,7 @@ export function describeEnv() {
     line('ffprobe', BIN.ffprobe),
     line('chrome', BIN.chrome, BIN.chrome ? '' : '  → 无法生成 PDF，可用 CHROME_PATH 指定'),
     line('whisper', BIN.whisper, BIN.whisper ? `  (${WHISPER_MODEL})` : '  → 语音转文字不可用'),
+    line('say', BIN.say, BIN.say ? `  (视频语音 ${VIDEO.audioSource} · ${VIDEO.ttsVoice})` : '  → TTS 视频配音不可用'),
     line('llm', LLM.configured ? `${LLM.label} · ${LLM.model}` : '✗ 未配置',
       LLM.configured ? `\n           ${LLM.baseUrl}${LLM.apiKey ? '  (已配置密钥)' : ''}` : '  → 见 .env.example'),
   ].join('\n');

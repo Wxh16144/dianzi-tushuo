@@ -50,7 +50,12 @@ router.post('/export', async (req, res) => {
 });
 
 router.post('/export/video', async (req, res) => {
-  const result = await withVideoLock(() => buildVideos({ state: getState(), mode: req.body?.mode, itemId: req.body?.itemId }));
+  const result = await withVideoLock(() => buildVideos({
+    state: getState(),
+    mode: req.body?.mode,
+    itemId: req.body?.itemId,
+    audioSource: req.body?.audioSource,
+  }));
   res.json(result);
 });
 

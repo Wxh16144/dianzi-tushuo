@@ -308,11 +308,35 @@ describe('纯函数', () => {
 
     assert.equal(config.resolveVideoConfig({ burnText: false }).burnText, false);
     assert.equal(config.resolveVideoConfig({ fontFamily: 'SimHei' }).fontFamily, 'SimHei');
+
+    // 音频来源与 TTS 语音默认值
+    assert.equal(config.resolveVideoConfig({}).audioSource, 'auto');
+    assert.equal(config.resolveVideoConfig({}).ttsVoice, 'Tingting');
+    assert.equal(config.resolveVideoConfig({ audioSource: 'tts' }).audioSource, 'tts');
+    assert.equal(config.resolveVideoConfig({ audioSource: 'bogus' }).audioSource, 'auto', '非法来源回退 auto');
+    assert.equal(config.resolveVideoConfig({ ttsVoice: '' }).ttsVoice, 'Tingting', '空语音回退默认');
+  });
+
+  test('resolveAudioSource：auto 按有无录音决策，recording/tts 强制', () => {
+    assert.equal(video.resolveAudioSource('auto', true), 'recording');
+    assert.equal(video.resolveAudioSource('auto', false), 'tts');
+    assert.equal(video.resolveAudioSource('recording', true), 'recording');
+    assert.equal(video.resolveAudioSource('recording', false), 'recording');
+    assert.equal(video.resolveAudioSource('tts', true), 'tts');
+    assert.equal(video.resolveAudioSource('tts', false), 'tts');
+  });
+
+  test('ttsTextFor：文案优先，无文案读标题，都空返回 null', () => {
+    assert.equal(video.ttsTextFor({ text: '背景板：香槟金', title: '背景板' }), '背景板：香槟金');
+    assert.equal(video.ttsTextFor({ text: '  ', title: '背景板' }), '背景板');
+    assert.equal(video.ttsTextFor({ text: '', title: '' }), null);
+    assert.equal(video.ttsTextFor(null), null);
   });
 });
 
 describe('buildVideos（真实 ffmpeg）', () => {
-  const smallCfg = { width: 320, height: 568, fps: 10, secondsPerImage: 1, burnText: true, fontFamily: 'Arial' };
+  // recording：测试里无录音条目保持静音（旧行为），避免默认 auto 触发系统 TTS 影响时长断言
+  const smallCfg = { width: 320, height: 568, fps: 10, secondsPerImage: 1, burnText: true, fontFamily: 'Arial', audioSource: 'recording', ttsVoice: 'Tingting' };
 
   test('生成章节视频（每个章节一个文件，不含合集）', async (t) => {
     if (skipReason) return t.skip(skipReason);
