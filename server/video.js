@@ -18,6 +18,8 @@ const TITLE_SOUND_SECONDS = 0.4;
 const TITLE_SOUND_FILE = 'transition-whoosh.m4a';
 /** TTS 朗读时每个换行处插入的停顿时长（毫秒），用 macOS say 的 [[slnc N]] 内嵌指令 */
 const TTS_NEWLINE_PAUSE_MS = 400;
+/** 片段封装版本：音频补齐方式/封装参数变更时递增，让旧缓存片段失效 */
+const CLIP_FORMAT_VERSION = 2;
 
 const badRequest = (message, status) => Object.assign(new Error(message), { status });
 
@@ -40,7 +42,7 @@ function cfgVideoSig(cfg) {
 
 /** 完整配置签名：含音频来源/语音，供最终合成缓存使用 */
 function cfgSig(cfg) {
-  return [cfgVideoSig(cfg), cfg.audioSource, cfg.ttsVoice].join('|');
+  return [cfgVideoSig(cfg), cfg.audioSource, cfg.ttsVoice, CLIP_FORMAT_VERSION].join('|');
 }
 
 /** 进度条签名：进度条内容/位置变了，缓存就失效 */
@@ -82,7 +84,7 @@ export function videoItemCacheKey({ imageRels, imageSigs, text, title, cfg, prog
 
 /** 计算标题过渡片段的缓存 key（标题卡片不含音频，用画面签名） */
 export function titleCacheKey({ title, subtitle, cfg }) {
-  return hashStr([`title:${title}`, `sub:${subtitle}`, cfgVideoSig(cfg)].join('\n'));
+  return hashStr([`title:${title}`, `sub:${subtitle}`, cfgVideoSig(cfg), CLIP_FORMAT_VERSION].join('\n'));
 }
 
 /** 文件签名：size + mtime，文件变化则缓存失效；不存在返回 null */
@@ -589,6 +591,8 @@ export function buildClipArgs({ framePaths, audioPath, total, seg, fps }) {
   if (audioPath) {
     args.push('-i', audioPath);
     args.push('-map', '[v]', '-map', `${n}:a`);
+    // 音轨必须补齐到视频长度：拼接用 -c copy，音轨偏短会在接缝处留下时间轴空洞
+    args.push('-af', 'apad');
   } else {
     args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
     args.push('-map', '[v]', '-map', `${n}:a`);
@@ -815,10 +819,11 @@ async function concatClips(clipPaths, outPath, listDir) {
 
 /**
  * 把「无音频视频轨」和音频合并成一个完整 clip：视频流直接 copy（秒级），
- * 音频转成 aac 保证与其它片段规格一致。视频轨 ≥ 音频时不加 -shortest，
- * 输出时长取较长的视频轨，音频不足的部分自动补静音。
+ * 音频转成 aac 保证与其它片段规格一致。输出时长取视频轨，音频用 apad 补静音到等长，
+ * 保证拼接到章节/合集视频时音画始终对齐。
  */
 async function muxAudio(videoPath, audioPath, outPath) {
+  const total = await probeDuration(videoPath);
   await runFfmpeg(
     [
       '-y', '-hide_banner', '-loglevel', 'error',
@@ -826,9 +831,11 @@ async function muxAudio(videoPath, audioPath, outPath) {
       '-i', audioPath,
       '-map', '0:v', '-map', '1:a',
       '-c:v', 'copy',
+      '-af', 'apad',
       '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
       '-movflags', '+faststart',
       '-video_track_timescale', '90000',
+      ...(total > 0 ? ['-t', String(total)] : []),
     ],
     outPath,
   );
@@ -971,6 +978,8 @@ export function buildGalleryClipArgs({ seq, stillByIndex, transByPair, hold, tra
   if (audioPath) {
     args.push('-i', audioPath);
     args.push('-map', '[outv]', '-map', `${idx}:a`);
+    // 同 buildClipArgs：音轨补齐到视频长度，避免拼接接缝处的空洞累积成音画不同步
+    args.push('-af', 'apad');
   } else {
     args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
     args.push('-map', '[outv]', '-map', `${idx}:a`);
