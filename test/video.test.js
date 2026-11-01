@@ -863,4 +863,58 @@ describe('音画对齐（真实 ffmpeg）', () => {
     assert.equal(after, before, '二次导出应命中缓存，不重写缓存文件');
     assert.ok((await fs.stat(path.join(config.EXPORTS_DIR, 'videos', second.files[0].name))).size > 0, '导出文件应被重新生成');
   });
+
+  test('多图条目：过渡段画面确实在滑动（不是静止帧）', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    // 两张纯色图：左红右绿，滑动时中间帧必然左右半区颜色不同
+    const red = await media.processImage(await makeImage({ width: 400, height: 300, color: { r: 200, g: 20, b: 20 } }), { sectionSeq: 23, itemSeq: 1 });
+    const green = await media.processImage(await makeImage({ width: 400, height: 300, color: { r: 20, g: 160, b: 40 } }), { sectionSeq: 23, itemSeq: 2 });
+
+    const state = {
+      title: '过渡测试',
+      sections: [
+        {
+          seq: 1,
+          name: '主舞台',
+          items: [{ seq: 1, title: '两张', text: '', images: [red, green], audio: null }],
+        },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: { ...cfg, secondsPerImage: 1, transSeconds: 0.5 }, mode: 'items' });
+    const videoPath = path.join(config.EXPORTS_DIR, 'videos', result.files[0].name);
+
+    /** 抽一帧，返回左右两半的平均 RGB */
+    const halves = async (seconds) => {
+      const frame = path.join(config.TMP_DIR, `probe-${Date.now()}-${seconds}.png`);
+      await execa(config.BIN.ffmpeg, ['-y', '-v', 'error', '-ss', String(seconds), '-i', videoPath, '-frames:v', '1', frame]);
+      const { data, info } = await sharp(frame).raw().toBuffer({ resolveWithObject: true });
+      const { width, height, channels } = info;
+      const acc = { l: [0, 0, 0], r: [0, 0, 0] };
+      const cnt = { l: 0, r: 0 };
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const i = (y * width + x) * channels;
+          const side = x < width / 2 ? 'l' : 'r';
+          for (let c = 0; c < 3; c += 1) acc[side][c] += data[i + c];
+          cnt[side] += 1;
+        }
+      }
+      await fs.rm(frame, { force: true });
+      const avg = (s) => acc[s].map((v) => v / cnt[s]);
+      return { left: avg('l'), right: avg('r') };
+    };
+
+    // 时间线：图0 停 1s → 过渡 0.5s → 图1 停 1s …
+    const still = await halves(0.4);
+    assert.ok(still.left[0] > still.right[1] || still.left[0] > 100, `停留段应偏红：${still.left}`);
+
+    const mid = await halves(1.25);
+    const gap = Math.abs(mid.left[0] - mid.right[0]) + Math.abs(mid.left[1] - mid.right[1]);
+    assert.ok(
+      gap > 30,
+      `过渡段左右半区颜色应有明显差异（说明两图在滑动），实际 左=${mid.left.map(Math.round)} 右=${mid.right.map(Math.round)}`,
+    );
+  });
 });

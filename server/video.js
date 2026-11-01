@@ -13,7 +13,7 @@ const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
 /** TTS 朗读时每个换行处插入的停顿时长（毫秒），用 macOS say 的 [[slnc N]] 内嵌指令 */
 const TTS_NEWLINE_PAUSE_MS = 400;
 /** 片段封装版本：只用于「输入没变但代码逻辑变了」，改常量请依赖各自的签名函数 */
-const CLIP_FORMAT_VERSION = 3;
+const CLIP_FORMAT_VERSION = 4;
 
 /**
  * 渲染常量：都会改变输出字节，因此全部参与所属层的缓存签名。
@@ -299,7 +299,11 @@ export function computeSegments({
   return { total: round3(total), seg: round3(seg) };
 }
 
-/** 缓动：先慢后快再慢，让滑动过渡更自然 */
+/**
+ * 缓动：先慢后快再慢，让滑动过渡更自然。
+ * 实际渲染由 ffmpeg 的 overlay 表达式完成（见 buildGalleryClipArgs 的 ease），
+ * 这里保留 JS 版本作为形状基准——改这里必须同步改那段表达式。
+ */
 export const easeInOutCubic = (t) => {
   const x = Math.min(1, Math.max(0, Number(t) || 0));
   return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
@@ -700,22 +704,27 @@ async function thumbTile(imagePath, w, h, active) {
   return tile;
 }
 
-/** 渲染一帧「画册停留」：大图区 contain 当前图 + 底部缩略图条（当前高亮）+ 计数角标 + 可选字幕 */
-export async function renderGalleryStill(outputPath, { layout, images, aspects, activeIndex, burnText, fontFamily, text }) {
+/** 渲染「舞台大图」：按 contain 矩形缩放（只含图片本身，黑边由 ffmpeg 的底色提供）。
+ *  返回该图相对舞台左上角的偏移，供 ffmpeg overlay 定位。 */
+async function renderStageImage(outputPath, { image, aspect, stage }) {
+  const r = containedRect(aspect, stage.w, stage.h);
+  await sharp(image)
+    .rotate()
+    .resize(Math.max(1, Math.round(r.w)), Math.max(1, Math.round(r.h)), { fit: 'fill' })
+    .png({ compressionLevel: 1 })
+    .toFile(outputPath);
+  return { x: stage.x + Math.round(r.x), y: stage.y + Math.round(r.y) };
+}
+
+/**
+ * 渲染「界面层」：透明背景 + 缩略图条（当前项高亮）+ 计数角标 + 可选字幕。
+ * 不含大图，因此过渡时可以让它保持不动，只让大图滑动。
+ */
+async function renderChromeLayer(outputPath, { layout, images, activeIndex, burnText, fontFamily, text }) {
   const width = layout.stage.w;
   const height = layout.thumbBar.y + layout.thumbBar.h;
   const composites = [];
 
-  // 大图 contain 到舞台
-  const aspect = aspects[activeIndex];
-  const r = containedRect(aspect, layout.stage.w, layout.stage.h);
-  const big = await sharp(images[activeIndex])
-    .rotate()
-    .resize(Math.max(1, Math.round(r.w)), Math.max(1, Math.round(r.h)), { fit: 'fill' })
-    .toBuffer();
-  composites.push({ input: big, top: layout.stage.y + Math.round(r.y), left: layout.stage.x + Math.round(r.x) });
-
-  // 缩略图条
   for (let i = 0; i < layout.thumbs.length; i += 1) {
     const t = layout.thumbs[i];
     const tile = await thumbTile(images[i], t.w, t.h, i === activeIndex);
@@ -732,72 +741,9 @@ export async function renderGalleryStill(outputPath, { layout, images, aspects, 
     }
   }
 
-  await sharp({
-    create: { width, height, channels: 3, background: { r: 16, g: 18, b: 24 } },
-  })
+  await sharp({ create: { width, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
     .composite(composites)
-    .jpeg(RENDER.frameJpeg)
-    .toFile(outputPath);
-}
-
-/**
- * 渲染一帧「画册滑动」：大图按方向横向滑动（正向看下一张左移，反向看上一张右移），
- * 缩略图条里高亮切到目标图。
- */
-export async function renderGalleryTransition(outputPath, { layout, images, aspects, fromIndex, toIndex, t, burnText = false, fontFamily = 'Arial', text = '' }) {
-  const width = layout.stage.w;
-  const height = layout.thumbBar.y + layout.thumbBar.h;
-  const dir = toIndex > fromIndex ? 1 : -1;
-  const e = easeInOutCubic(t);
-  const composites = [];
-
-  const fromRect = containedRect(aspects[fromIndex], layout.stage.w, layout.stage.h);
-  const toRect = containedRect(aspects[toIndex], layout.stage.w, layout.stage.h);
-
-  const fromBig = await sharp(images[fromIndex])
-    .rotate()
-    .resize(Math.max(1, Math.round(fromRect.w)), Math.max(1, Math.round(fromRect.h)), { fit: 'fill' })
-    .toBuffer();
-  composites.push({
-    input: fromBig,
-    top: layout.stage.y + Math.round(fromRect.y),
-    left: layout.stage.x + Math.round(fromRect.x) - Math.round(dir * layout.stage.w * e),
-  });
-
-  const toBig = await sharp(images[toIndex])
-    .rotate()
-    .resize(Math.max(1, Math.round(toRect.w)), Math.max(1, Math.round(toRect.h)), { fit: 'fill' })
-    .toBuffer();
-  composites.push({
-    input: toBig,
-    top: layout.stage.y + Math.round(toRect.y),
-    left: layout.stage.x + Math.round(toRect.x) + Math.round(dir * layout.stage.w * (1 - e)),
-  });
-
-  // 缩略图条：目标图高亮
-  for (let i = 0; i < layout.thumbs.length; i += 1) {
-    const t = layout.thumbs[i];
-    const tile = await thumbTile(images[i], t.w, t.h, i === toIndex);
-    composites.push({ input: tile, top: t.y, left: t.x });
-  }
-
-  // 过渡中也显示目标计数
-  const badge = buildCounterBadge({ width, height, index: toIndex, total: layout.thumbs.length, fontFamily: 'Arial' });
-  composites.push({ input: await sharp(Buffer.from(badge)).png().toBuffer(), top: 0, left: 0 });
-
-  // 文案作为固定位置的浮动标签，切换图片时保持不動（和停留帧一致）
-  if (burnText) {
-    const svg = buildCaptionSvg({ width, height, text, fontFamily, bottom: layout.captionBottom });
-    if (svg) {
-      composites.push({ input: await sharp(Buffer.from(svg)).png().toBuffer(), top: 0, left: 0 });
-    }
-  }
-
-  await sharp({
-    create: { width, height, channels: 3, background: { r: 16, g: 18, b: 24 } },
-  })
-    .composite(composites)
-    .jpeg(RENDER.frameJpeg)
+    .png({ compressionLevel: 1 })
     .toFile(outputPath);
 }
 
@@ -969,45 +915,111 @@ async function concatChapter({ entries, outPath, cfg, tmpDir }) {
 }
 
 /**
- * 构造画册条目的 ffmpeg 参数：按 seq（来回循环索引）依次「停留 + 滑动」。
- * stillByIndex / transByPair 分别是复用缓存的停留帧与过渡帧序列，避免重复渲染。
+ * 构造画册条目的 ffmpeg 参数：停留段是静态画面，过渡段的水平滑动交给 ffmpeg 的 overlay 表达式。
+ * 大图与界面层分开输入，界面层在过渡中保持不动，因此过渡帧不需要逐帧渲染。
  */
-export function buildGalleryClipArgs({ seq, stillByIndex, transByPair, hold, trans, fps, audioPath, total }) {
+export function buildGalleryClipArgs({ seq, stageByIndex, chromeByIndex, rects, canvas, hold, trans, fps, audioPath, total }) {
   const args = ['-y', '-hide_banner', '-loglevel', 'error'];
   const filters = [];
-  const labels = [];
-  let idx = 0;
+  let inputIdx = 0;
 
+  // 时间片：停留与过渡交替
+  const shots = [];
   for (let i = 0; i < seq.length; i += 1) {
-    const still = stillByIndex.get(seq[i]);
-    args.push('-loop', '1', '-t', String(hold), '-i', still);
-    filters.push(`[${idx}:v]fps=${fps},format=yuv420p,setsar=1[s${i}]`);
-    labels.push(`[s${i}]`);
-    idx += 1;
-
+    shots.push({ kind: 'still', index: seq[i] });
     if (i < seq.length - 1 && trans > 0) {
-      const key = `${seq[i]}>${seq[i + 1]}`;
-      const pattern = transByPair.get(key);
-      if (pattern) {
-        args.push('-framerate', String(fps), '-i', pattern);
-        filters.push(`[${idx}:v]format=yuv420p,setsar=1[t${i}]`);
-        labels.push(`[t${i}]`);
-        idx += 1;
-      }
+      shots.push({ kind: 'trans', from: seq[i], to: seq[i + 1] });
     }
   }
 
-  filters.push(`${labels.join('')}concat=n=${labels.length}:v=1:a=0[outv]`);
+  // 统计引用次数：同一个源文件只解码一次，用 split 分发到各时间片
+  const imageUse = new Map();
+  const chromeUse = new Map();
+  const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
+  for (const s of shots) {
+    if (s.kind === 'still') {
+      bump(imageUse, s.index);
+      bump(chromeUse, s.index);
+    } else {
+      bump(imageUse, s.from);
+      bump(imageUse, s.to);
+      bump(chromeUse, s.to);
+    }
+  }
+
+  // 底色：每个时间片一份
+  args.push('-f', 'lavfi', '-i', `color=c=0x101218:s=${canvas.w}x${canvas.h}:r=${fps}`);
+  const colorIdx = inputIdx;
+  inputIdx += 1;
+  filters.push(`[${colorIdx}:v]split=${shots.length}${shots.map((_, n) => `[bg${n}]`).join('')}`);
+
+  const addInputs = (map, pathOf, prefix, outMap) => {
+    for (const [index, count] of map) {
+      args.push('-loop', '1', '-i', pathOf(index));
+      const src = inputIdx;
+      inputIdx += 1;
+      const outs = [];
+      for (let k = 0; k < count; k += 1) outs.push(`${prefix}${index}_${k}`);
+      filters.push(`[${src}:v]split=${count}${outs.map((o) => `[${o}]`).join('')}`);
+      outMap.set(index, outs);
+    }
+  };
+
+  const imageLabels = new Map();
+  const chromeLabels = new Map();
+  addInputs(imageUse, (i) => stageByIndex.get(i), 'im', imageLabels);
+  addInputs(chromeUse, (i) => chromeByIndex.get(i), 'ch', chromeLabels);
+
+  const take = (map, index) => map.get(index).shift();
+  const segLabels = [];
+
+  shots.forEach((shot, n) => {
+    const dur = shot.kind === 'still' ? hold : trans;
+    filters.push(`[bg${n}]trim=duration=${dur},setpts=PTS-STARTPTS[b${n}]`);
+
+    if (shot.kind === 'still') {
+      const img = take(imageLabels, shot.index);
+      const chrome = take(chromeLabels, shot.index);
+      const r = rects.get(shot.index);
+      filters.push(`[${img}]trim=duration=${dur},setpts=PTS-STARTPTS,fps=${fps}[i${n}]`);
+      filters.push(`[${chrome}]trim=duration=${dur},setpts=PTS-STARTPTS,fps=${fps}[c${n}]`);
+      filters.push(`[b${n}][i${n}]overlay=x=${r.x}:y=${r.y}:eval=frame[o${n}a]`);
+      filters.push(`[o${n}a][c${n}]overlay=0:0,format=yuv420p[s${n}]`);
+    } else {
+      const dir = shot.to > shot.from ? 1 : -1;
+      const sign = dir > 0 ? '-' : '+';
+      const backSign = dir > 0 ? '+' : '-';
+      const fr = rects.get(shot.from);
+      const tr = rects.get(shot.to);
+      const imgFrom = take(imageLabels, shot.from);
+      const imgTo = take(imageLabels, shot.to);
+      const chrome = take(chromeLabels, shot.to);
+      const u = `clip(t/${dur},0,1)`;
+      // 与 easeInOutCubic 等价的三次缓动，改写时必须两处同步
+      const ease = `if(lt(${u},0.5),4*pow(${u},3),1-pow(2-2*${u},3)/2)`;
+
+      filters.push(`[${imgFrom}]trim=duration=${dur},setpts=PTS-STARTPTS,fps=${fps}[if${n}]`);
+      filters.push(`[${imgTo}]trim=duration=${dur},setpts=PTS-STARTPTS,fps=${fps}[it${n}]`);
+      filters.push(`[${chrome}]trim=duration=${dur},setpts=PTS-STARTPTS,fps=${fps}[c${n}]`);
+      filters.push(`[b${n}][if${n}]overlay=x='${fr.x}${sign}${canvas.w}*(${ease})':y=${fr.y}:eval=frame[o${n}a]`);
+      filters.push(`[o${n}a][it${n}]overlay=x='${tr.x}${backSign}${canvas.w}*(1-(${ease}))':y=${tr.y}:eval=frame[o${n}b]`);
+      filters.push(`[o${n}b][c${n}]overlay=0:0,format=yuv420p[s${n}]`);
+    }
+
+    segLabels.push(`[s${n}]`);
+  });
+
+  filters.push(`${segLabels.join('')}concat=n=${shots.length}:v=1:a=0[outv]`);
   args.push('-filter_complex', filters.join(';'));
 
   if (audioPath) {
     args.push('-i', audioPath);
-    args.push('-map', '[outv]', '-map', `${idx}:a`);
-    // 同 buildClipArgs：音轨补齐到视频长度，避免拼接接缝处的空洞累积成音画不同步
+    args.push('-map', '[outv]', '-map', `${inputIdx}:a`);
+    // 音轨补齐到视频长度，避免拼接接缝处的空洞累积成音画不同步
     args.push('-af', 'apad');
   } else {
     args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
-    args.push('-map', '[outv]', '-map', `${idx}:a`);
+    args.push('-map', '[outv]', '-map', `${inputIdx}:a`);
   }
 
   args.push(
@@ -1021,42 +1033,25 @@ export function buildGalleryClipArgs({ seq, stillByIndex, transByPair, hold, tra
 }
 
 /**
- * 渲染画册条目的全部帧：每个唯一 index 的停留帧 + 每个唯一 (from,to) 方向的过渡帧。
- * 帧只依赖画面内容，与音频无关，因此可以跨不同音频复用。
+ * 渲染画册条目的素材：每张图一张「舞台大图」+ 一张「界面层」（缩略图条/角标/字幕）。
+ * 帧数从「每段过渡 × 帧率」降到「图片数 × 2」，滑动由 ffmpeg 完成。
  */
-async function renderGalleryFrames({ images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, fps }) {
-  const n = images.length;
+async function renderGalleryFrames({ images, aspects, layout, base, tmpDir, burnText, fontFamily, text }) {
+  const stageByIndex = new Map();
+  const chromeByIndex = new Map();
+  const rects = new Map();
 
-  // 停留帧：每个唯一 index 渲染一次，来回循环时复用
-  const stillByIndex = new Map();
-  for (let i = 0; i < n; i += 1) {
-    const frame = path.join(tmpDir, `${base}-still-${i}.jpg`);
-    await renderGalleryStill(frame, { layout, images, aspects, activeIndex: i, burnText, fontFamily, text });
-    stillByIndex.set(i, frame);
+  for (let i = 0; i < images.length; i += 1) {
+    const stagePath = path.join(tmpDir, `${base}-stage-${i}.png`);
+    rects.set(i, await renderStageImage(stagePath, { image: images[i], aspect: aspects[i], stage: layout.stage }));
+    stageByIndex.set(i, stagePath);
+
+    const chromePath = path.join(tmpDir, `${base}-chrome-${i}.png`);
+    await renderChromeLayer(chromePath, { layout, images, activeIndex: i, burnText, fontFamily, text });
+    chromeByIndex.set(i, chromePath);
   }
 
-  // 过渡帧：每个唯一 (from,to) 方向渲染一次，来回循环时复用
-  const transByPair = new Map();
-  const tframes = timeline.trans > 0 ? Math.max(1, Math.round(timeline.trans * fps)) : 0;
-  for (let i = 0; i < timeline.seq.length - 1; i += 1) {
-    const from = timeline.seq[i];
-    const to = timeline.seq[i + 1];
-    const key = `${from}>${to}`;
-    if (transByPair.has(key)) continue;
-    if (tframes === 0) {
-      transByPair.set(key, null);
-      continue;
-    }
-    const pattern = path.join(tmpDir, `${base}-trans-${from}-${to}-%03d.jpg`);
-    for (let j = 0; j < tframes; j += 1) {
-      const t = tframes === 1 ? 1 : j / (tframes - 1);
-      const framePath = path.join(tmpDir, `${base}-trans-${from}-${to}-${String(j).padStart(3, '0')}.jpg`);
-      await renderGalleryTransition(framePath, { layout, images, aspects, fromIndex: from, toIndex: to, t, burnText, fontFamily, text });
-    }
-    transByPair.set(key, pattern);
-  }
-
-  return { stillByIndex, transByPair };
+  return { stageByIndex, chromeByIndex, rects };
 }
 
 /**
@@ -1084,13 +1079,15 @@ async function ensureVideoTrack({ images, aspects, layout, text, cfg, minFull, v
   });
 
   const base = `v-${videoKey.slice(0, 12)}`;
-  const { stillByIndex, transByPair } = await renderGalleryFrames({
-    images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, fps,
+  const { stageByIndex, chromeByIndex, rects } = await renderGalleryFrames({
+    images, aspects, layout, base, tmpDir, burnText, fontFamily, text,
   });
   const args = buildGalleryClipArgs({
     seq: timeline.seq,
-    stillByIndex,
-    transByPair,
+    stageByIndex,
+    chromeByIndex,
+    rects,
+    canvas: { w: layout.stage.w, h: layout.thumbBar.y + layout.thumbBar.h },
     hold: timeline.hold,
     trans: timeline.trans,
     fps,
@@ -1191,13 +1188,15 @@ async function buildItemClip({ images, imageRels, text, title, audio, audioRel, 
     : timelineNoAudio;
 
   const base = `item-${key.slice(0, 12)}`;
-  const { stillByIndex, transByPair } = await renderGalleryFrames({
-    images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, fps,
+  const { stageByIndex, chromeByIndex, rects } = await renderGalleryFrames({
+    images, aspects, layout, base, tmpDir, burnText, fontFamily, text,
   });
   const args = buildGalleryClipArgs({
     seq: timeline.seq,
-    stillByIndex,
-    transByPair,
+    stageByIndex,
+    chromeByIndex,
+    rects,
+    canvas: { w: layout.stage.w, h: layout.thumbBar.y + layout.thumbBar.h },
     hold: timeline.hold,
     trans: timeline.trans,
     fps,
