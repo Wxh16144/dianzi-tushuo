@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light" />
+  <title>电子图说</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cpath d='M9 10h9M9 16h14M9 22h11' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <div class="title-wrap">
+        <input id="docTitle" class="doc-title" type="text" placeholder="清单标题" aria-label="清单标题" />
+        <h1 id="docTitleH" class="doc-title-h" hidden></h1>
+      </div>
+      <div class="topbar-actions" id="topbarActions">
+        <span id="saveIndicator" class="save-indicator">已保存</span>
+        <div class="action-group" role="group" aria-label="工作区">
+          <button id="btnOpenWorkdir" class="btn" type="button" title="在 Finder 中打开工作区文件夹">打开文件夹</button>
+        </div>
+        <div class="action-group" role="group" aria-label="撤销重做">
+          <button id="btnUndo" class="btn" type="button" disabled title="撤销（⌘Z）">撤销</button>
+          <button id="btnRedo" class="btn" type="button" disabled title="重做（⇧⌘Z）">重做</button>
+        </div>
+        <div class="action-group" role="group" aria-label="分享预览">
+          <button id="btnPreview" class="btn" type="button" title="在新标签页打开只读视图（⌘⇧P）">预览</button>
+        </div>
+        <div class="action-group" role="group" aria-label="导出文件">
+          <button id="btnPdf" class="btn" type="button">导出 PDF</button>
+          <button id="btnExport" class="btn primary" type="button">导出 Zip</button>
+        </div>
+        <div class="action-group" role="group" aria-label="备份恢复">
+          <button id="btnImport" class="btn" type="button">导入</button>
+          <input id="importInput" type="file" accept=".zip,application/zip" hidden />
+        </div>
+        <div class="action-group" role="group" aria-label="危险操作">
+          <button id="btnReset" class="btn ghost" type="button">清空</button>
+        </div>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs" aria-label="页签"></nav>
+
+    <div class="workspace">
+      <aside class="outline" id="outline" aria-label="条目大纲"></aside>
+      <main class="list" id="list" aria-live="polite"></main>
+    </div>
+
+    <footer class="hintbar" id="hintbar">
+      <span><b>点击</b>卡片选中</span>
+      <span><b>⌘V</b> 粘贴图片</span>
+      <span><b>长按空格</b>录音</span>
+      <span><b>⌘↵</b> 新建条目</span>
+      <span><b>⌘S</b> 保存</span>
+      <span><b>↑↓</b> 切换</span>
+      <span><b>⌫</b> 删除条目</span>
+    </footer>
+  </div>
+
+  <div class="lightbox" id="lightbox" hidden aria-label="图片预览">
+    <button class="lb-close" id="lbClose" type="button" aria-label="关闭">×</button>
+    <button class="lb-nav lb-prev" id="lbPrev" type="button" aria-label="上一张">‹</button>
+    <div class="lb-stage" id="lbStage">
+      <img id="lightboxImg" alt="" />
+      <div class="lb-count" id="lbCount"></div>
+    </div>
+    <button class="lb-nav lb-next" id="lbNext" type="button" aria-label="下一张">›</button>
+  </div>
+
+  <!-- 键盘可操作的确认弹窗：Enter 确认、Esc 取消、Tab 切换 -->
+  <div class="dialog-layer" id="dialogLayer" hidden>
+    <div
+      class="dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="dialogTitle"
+      aria-describedby="dialogText"
+    >
+      <h2 class="dialog-title" id="dialogTitle"></h2>
+      <p class="dialog-text" id="dialogText"></p>
+      <div class="dialog-actions">
+        <button class="btn dialog-cancel" id="dialogCancel" type="button">取消</button>
+        <button class="btn dialog-ok" id="dialogOk" type="button">删除</button>
+      </div>
+      <div class="dialog-tip"><b>Enter</b> 确认 · <b>Esc</b> 取消 · <b>Tab</b> 切换</div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
+
+  <div class="drop-overlay" id="dropOverlay" hidden>
+    <div class="drop-overlay-inner">松开导入图片或备份</div>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

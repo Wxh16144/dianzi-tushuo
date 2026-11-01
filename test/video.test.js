@@ -1,0 +1,545 @@
+import test, { describe, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createSandbox, makeImage } from './helpers/sandbox.js';
+
+let box;
+let config;
+let media;
+let video;
+let skipReason = null;
+
+before(async () => {
+  box = await createSandbox('hubz-video-');
+  config = box.config;
+  media = await import('../server/media.js');
+  video = await import('../server/video.js');
+  if (!config.BIN.ffmpeg) skipReason = '本机没有 ffmpeg';
+});
+
+after(async () => {
+  await box.cleanup();
+});
+
+describe('纯函数', () => {
+  test('slug：中文保留、分隔符与空白替换', () => {
+    assert.equal(video.slug('主舞台'), '主舞台');
+    assert.equal(video.slug('迎宾区 入口'), '迎宾区-入口');
+    assert.equal(video.slug('a/b:c*d?'), 'a-b-c-d');
+    assert.equal(video.slug('   '), '未命名');
+    assert.equal(video.slug(''), '未命名');
+  });
+
+  test('escapeXml：转义 XML 特殊字符', () => {
+    assert.equal(video.escapeXml('<a>&"b"'), '&lt;a&gt;&amp;&quot;b&quot;');
+  });
+
+  test('captionLines：固定宽度折行，超长返回 null（整体隐藏）', () => {
+    assert.deepEqual(video.captionLines('一二三四五六七八九十', 4, 3), ['一二三四', '五六七八', '九十']);
+    assert.equal(video.captionLines('一二三四五六七八九十一二三', 4, 3), null, '超过 3 行应整体隐藏');
+    assert.deepEqual(video.captionLines(''), []);
+    assert.deepEqual(video.captionLines('   '), []);
+  });
+
+  test('itemCacheKey：内容/配置/进度条变化会改变 key，相同输入稳定', () => {
+    const cfg = { width: 1080, height: 1920, fps: 25, secondsPerImage: 2, transSeconds: 0.5, burnText: true, fontFamily: 'Arial' };
+    const base = {
+      imageRels: ['images/a.jpg', 'images/b.jpg'],
+      imageSigs: ['100:1', '200:2'],
+      text: '背景板',
+      title: '背景板',
+      audioRel: 'audio/a.mp3',
+      audioSig: '300:3',
+      cfg,
+      progress: { labels: ['背景板', '花艺'], activeIndex: 0 },
+    };
+
+    const k1 = video.itemCacheKey(base);
+    const k2 = video.itemCacheKey(base);
+    assert.equal(k1, k2, '相同输入应产生相同 key');
+    assert.match(k1, /^[0-9a-f]{20}$/);
+
+    // 文案变了 key 变
+    assert.notEqual(video.itemCacheKey({ ...base, text: '改了' }), k1);
+    // 标题变了 key 变
+    assert.notEqual(video.itemCacheKey({ ...base, title: '改了' }), k1);
+    // 图片变了 key 变
+    assert.notEqual(video.itemCacheKey({ ...base, imageRels: ['images/a.jpg'] }), k1);
+    // 图片文件签名变了 key 变（同一路径但内容变了）
+    assert.notEqual(video.itemCacheKey({ ...base, imageSigs: ['100:1', '999:2'] }), k1);
+    // 音频变了 key 变
+    assert.notEqual(video.itemCacheKey({ ...base, audioRel: 'audio/b.mp3' }), k1);
+    // 配置变了 key 变
+    assert.notEqual(video.itemCacheKey({ ...base, cfg: { ...cfg, secondsPerImage: 5 } }), k1);
+    // 进度条变了 key 变（不同位置/内容）
+    assert.notEqual(video.itemCacheKey({ ...base, progress: { labels: ['背景板', '花艺'], activeIndex: 1 } }), k1);
+    // 无进度条 vs 有进度条不同
+    assert.notEqual(video.itemCacheKey({ ...base, progress: null }), k1);
+  });
+
+  test('titleCacheKey：标题/副标题/配置决定 key', () => {
+    const cfg = { width: 1080, height: 1920, fps: 25, secondsPerImage: 2, transSeconds: 0.5, burnText: true, fontFamily: 'Arial' };
+    const k1 = video.titleCacheKey({ title: '背景板', subtitle: '主舞台', cfg });
+    assert.equal(video.titleCacheKey({ title: '背景板', subtitle: '主舞台', cfg }), k1);
+    assert.notEqual(video.titleCacheKey({ title: '花艺', subtitle: '主舞台', cfg }), k1);
+    assert.notEqual(video.titleCacheKey({ title: '背景板', subtitle: '迎宾区', cfg }), k1);
+  });
+
+  test('buildCaptionSvg：有文字生成 SVG，空文字或超长返回 null', () => {
+    const svg = video.buildCaptionSvg({ width: 1080, height: 1920, text: '背景板', fontFamily: 'Arial' });
+    assert.ok(svg);
+    assert.match(svg, /<svg/);
+    assert.match(svg, /背景板/);
+    assert.equal(video.buildCaptionSvg({ width: 1080, height: 1920, text: '', fontFamily: 'Arial' }), null);
+
+    // 超过 4 行（22 字/行）应整体隐藏
+    const long = '很'.repeat(22 * 4 + 1);
+    assert.equal(video.buildCaptionSvg({ width: 1080, height: 1920, text: long, fontFamily: 'Arial' }), null);
+  });
+
+  test('computeSegments：时长规则', () => {
+    assert.deepEqual(video.computeSegments({ imageCount: 3, secondsPerImage: 3 }), { total: 9, seg: 3 });
+
+    const withAudio = video.computeSegments({ imageCount: 2, secondsPerImage: 3, hasAudio: true, probedDuration: 8 });
+    assert.equal(withAudio.total, 8);
+    assert.equal(withAudio.seg, 4);
+
+    assert.equal(video.computeSegments({ imageCount: 2, secondsPerImage: 3, hasAudio: true, storedDuration: 6 }).total, 6);
+    assert.equal(video.computeSegments({ imageCount: 2, secondsPerImage: 3, hasAudio: true }).total, 6);
+    assert.equal(video.computeSegments({ imageCount: 1, secondsPerImage: 0.1 }).total, 0.5);
+  });
+
+  test('galleryLayout：大图区在上、缩略图条在下，缩略图都在画布内', () => {
+    const one = video.galleryLayout(1, 1080, 1920);
+    assert.equal(one.thumbs.length, 1);
+    assert.ok(one.stage.h > 0 && one.thumbBar.h > 0, '应同时有大图区和缩略图条');
+    assert.equal(one.stage.h + one.thumbBar.h, 1920, '舞台 + 缩略图条应占满画布高度');
+
+    const four = video.galleryLayout(4, 1080, 1920);
+    assert.equal(four.thumbs.length, 4);
+
+    for (const t of four.thumbs) {
+      assert.ok(t.x >= 0 && t.y >= four.thumbBar.y, '缩略图不应超出缩略图条上边界');
+      assert.ok(t.x + t.w <= 1080 + 1, `缩略图右侧越界：${JSON.stringify(t)}`);
+      assert.ok(t.y + t.h <= 1920 + 1, `缩略图底部越界：${JSON.stringify(t)}`);
+      assert.ok(t.w > 0 && t.h > 0, '缩略图尺寸应为正');
+    }
+  });
+
+  test('galleryLayout：图片很多时卡片动态缩窄，全部放得下不越界', () => {
+    // 12 张图（当前单条上限），卡片宽度应自动收缩到能全部塞进画布
+    const twelve = video.galleryLayout(12, 1080, 1920);
+    assert.equal(twelve.thumbs.length, 12);
+    const last = twelve.thumbs[twelve.thumbs.length - 1];
+    assert.ok(last.x + last.w <= 1080 + 1, `最右侧缩略图越界：${JSON.stringify(last)}`);
+    assert.ok(twelve.thumbs[0].x >= 0, '最左侧缩略图不应超出画布');
+
+    // 卡片宽度应明显比 4 张时窄
+    const four = video.galleryLayout(4, 1080, 1920);
+    assert.ok(twelve.thumbW < four.thumbW, '图片越多卡片越窄');
+
+    // 防御性：20 张（超过业务上限一倍）也不应越界
+    const twenty = video.galleryLayout(20, 1080, 1920);
+    const lastTwenty = twenty.thumbs[twenty.thumbs.length - 1];
+    assert.ok(lastTwenty.x + lastTwenty.w <= 1080 + 1, `20 张时最右侧越界：${JSON.stringify(lastTwenty)}`);
+    assert.ok(twenty.thumbW >= 24, '卡片宽度不应小于最小阈值');
+  });
+
+  test('containedRect：宽图上下留边，高图左右留边', () => {
+    const wide = video.containedRect(2, 1080, 1920);
+    assert.equal(Math.round(wide.w), 1080);
+    assert.equal(Math.round(wide.h), 540);
+    assert.equal(Math.round(wide.y), (1920 - 540) / 2);
+
+    const tall = video.containedRect(0.5, 1080, 1920);
+    assert.equal(Math.round(tall.h), 1920);
+    assert.equal(Math.round(tall.w), 960);
+    assert.equal(Math.round(tall.x), (1080 - 960) / 2);
+  });
+
+  test('easeInOutCubic：两端与中点', () => {
+    assert.equal(video.easeInOutCubic(0), 0);
+    assert.equal(video.easeInOutCubic(1), 1);
+    assert.equal(video.easeInOutCubic(0.5), 0.5);
+    assert.ok(video.easeInOutCubic(0.25) < 0.25, '前半段应更慢');
+    assert.ok(video.easeInOutCubic(0.75) > 0.75, '后半段应更快');
+  });
+
+  test('pingPongSequence：来回循环，首尾不重复', () => {
+    assert.deepEqual(video.pingPongSequence(1), [0]);
+    assert.deepEqual(video.pingPongSequence(2), [0, 1]);
+    assert.deepEqual(video.pingPongSequence(3), [0, 1, 2, 1]);
+    assert.deepEqual(video.pingPongSequence(4), [0, 1, 2, 3, 2, 1]);
+  });
+
+  test('computeGalleryTimeline：每张固定停留 + 来回循环，不按音频缩放', () => {
+    const single = video.computeGalleryTimeline({ imageCount: 1, secondsPerImage: 3 });
+    assert.equal(single.multi, false);
+    assert.equal(single.trans, 0);
+    assert.equal(single.hold, 3);
+    assert.equal(single.total, 3);
+
+    const multi = video.computeGalleryTimeline({ imageCount: 3, secondsPerImage: 3, transSeconds: 0.5 });
+    assert.equal(multi.multi, true);
+    assert.equal(multi.hold, 3, '每张固定停留 3 秒');
+    assert.equal(multi.trans, 0.5);
+    // 无语音：来回 2 轮，seq = [0,1,2,1, 0,1,2,1]，8 停留 + 7 过渡
+    assert.deepEqual(multi.seq, [0, 1, 2, 1, 0, 1, 2, 1]);
+    assert.equal(multi.total, 8 * 3 + 7 * 0.5);
+
+    // 有语音：停留仍是 3 秒不变，只是循环次数变多，总长对齐音频
+    const audio = video.computeGalleryTimeline({ imageCount: 3, secondsPerImage: 3, transSeconds: 0.5, hasAudio: true, probedDuration: 10 });
+    assert.equal(audio.hold, 3, '有语音也不能缩放每张停留时间');
+    assert.equal(audio.trans, 0.5);
+    assert.equal(audio.total, 10);
+    assert.ok(audio.seq.length >= 4, '至少覆盖一个来回');
+  });
+
+  test('computeGalleryTimeline：语音太短时保底放完每张图', () => {
+    // 6 张图、每张 2s、过渡 0.5s，最短完整展示一遍 = 6×2 + 5×0.5 = 14.5s
+    const shortAudio = video.computeGalleryTimeline({ imageCount: 6, secondsPerImage: 2, transSeconds: 0.5, hasAudio: true, probedDuration: 3 });
+    assert.equal(shortAudio.total, 14.5, '语音 3s 太短，应保底到放完每张图');
+    assert.equal(shortAudio.hold, 2, '每张仍固定停 2s');
+    // seq 至少覆盖一个正向 0..5（每张图都被看到一次）
+    assert.ok(shortAudio.seq.includes(0) && shortAudio.seq.includes(5));
+
+    // 单图也保底：语音 0.5s 但至少停 2s
+    const singleShort = video.computeGalleryTimeline({ imageCount: 1, secondsPerImage: 2, transSeconds: 0.5, hasAudio: true, probedDuration: 0.5 });
+    assert.equal(singleShort.total, 2);
+    assert.equal(singleShort.multi, false);
+  });
+
+  test('collectRenderPlan：跳过无图条目，按章节分组', () => {
+    const plan = video.collectRenderPlan({
+      sections: [
+        { seq: 1, name: 'A', items: [{ seq: 1, text: '有图', images: [{ file: 'images/a.jpg' }] }, { seq: 2, text: '无图', images: [] }] },
+        { seq: 2, name: 'B', items: [{ seq: 3, text: '也有图', images: [{ file: 'images/b.jpg' }] }] },
+        { seq: 3, name: 'C', items: [{ seq: 4, text: '全无图', images: [] }] },
+      ],
+    });
+    assert.deepEqual(plan.map((s) => s.name), ['A', 'B']);
+    assert.equal(plan[0].items[0].images[0], 'images/a.jpg');
+    assert.deepEqual(video.collectRenderPlan(null), []);
+    assert.deepEqual(video.collectRenderPlan({}), []);
+  });
+
+  test('findItemWithSection：按 id 定位条目', () => {
+    const state = {
+      sections: [{ name: 'A', items: [{ id: 'i1', text: 'x', images: [] }] }],
+    };
+    assert.equal(video.findItemWithSection(state, 'i1').section.name, 'A');
+    assert.equal(video.findItemWithSection(state, 'i1').item.id, 'i1');
+    assert.equal(video.findItemWithSection(state, 'nope'), null);
+  });
+
+  test('itemLabel / itemFileName：文件名稳定且可读，标题优先', () => {
+    const item = { seq: 3, text: '背景板：香槟金布幔\n第二行说明' };
+    const section = { seq: 1, name: '主舞台' };
+    assert.equal(video.itemLabel(item, section), '背景板：香槟金布幔');
+    assert.equal(video.itemLabel({ seq: 5, text: '' }, section, 2), '主舞台-5');
+
+    // 有标题时优先用标题
+    const titled = { seq: 3, title: '背景板', text: '背景板：香槟金布幔' };
+    assert.equal(video.itemLabel(titled, section), '背景板');
+
+    const name = video.itemFileName(section, item);
+    assert.match(name, /^01-03-/);
+    assert.ok(name.endsWith('.mp4'));
+    assert.ok(!name.includes('/'), `文件名不应含路径分隔符：${name}`);
+  });
+
+  test('buildProgressBar：单段返回 null，多段斑马纹 + 当前段高亮', () => {
+    assert.equal(video.buildProgressBar({ width: 1080, height: 1920, labels: ['A'], activeIndex: 0, fontFamily: 'Arial' }), null);
+
+    const svg = video.buildProgressBar({ width: 1080, height: 1920, labels: ['01', '02', '03'], activeIndex: 1, fontFamily: 'Arial' });
+    assert.ok(svg);
+    assert.match(svg, /<svg/);
+    assert.match(svg, /01/);
+    assert.match(svg, /02/);
+    assert.match(svg, /03/);
+    assert.ok(svg.includes('#2f6df6'), '当前段应使用高亮色');
+    assert.equal((svg.match(/<rect/g) || []).length, 3, '应有 3 个分段');
+  });
+
+  test('buildTitleCard：中央大字标题 + 可选副标题', () => {
+    const svg = video.buildTitleCard({ width: 1080, height: 1920, title: '背景板', subtitle: '主舞台', fontFamily: 'Arial' });
+    assert.match(svg, /背景板/);
+    assert.match(svg, /主舞台/);
+    assert.match(svg, /text-anchor="middle"/);
+
+    const noSub = video.buildTitleCard({ width: 1080, height: 1920, title: '第 2 项', fontFamily: 'Arial' });
+    assert.match(noSub, /第 2 项/);
+    assert.ok(!noSub.includes('主舞台'));
+  });
+
+  test('normalizeMode：非法值回退到 sections', () => {
+    assert.equal(video.normalizeMode('items'), 'items');
+    assert.equal(video.normalizeMode('sections'), 'sections');
+    assert.equal(video.normalizeMode('all'), 'all');
+    assert.equal(video.normalizeMode('bogus'), 'sections');
+    assert.equal(video.normalizeMode(undefined), 'sections');
+  });
+
+  test('buildClipArgs：静音 / 音频映射 / 拼接', () => {
+    const silent = video.buildClipArgs({ framePaths: ['/tmp/a.jpg'], audioPath: null, total: 3, seg: 3, fps: 25 });
+    assert.ok(silent.some((a) => String(a).includes('anullsrc')));
+    assert.ok(silent.some((a) => String(a).includes('concat=n=1:v=1:a=0')));
+    assert.ok(silent.some((a) => String(a).includes('yuv420p')));
+    assert.ok(silent.includes('-map'));
+
+    const withAudio = video.buildClipArgs({ framePaths: ['/tmp/a.jpg'], audioPath: '/tmp/a.mp3', total: 2, seg: 2, fps: 25 });
+    assert.ok(withAudio.includes('/tmp/a.mp3'));
+    assert.ok(!withAudio.some((a) => String(a).includes('anullsrc')));
+  });
+
+  test('resolveVideoConfig：默认值与边界夹取', () => {
+    const cfg = config.resolveVideoConfig({});
+    assert.deepEqual(
+      { width: cfg.width, height: cfg.height, fps: cfg.fps, secondsPerImage: cfg.secondsPerImage, burnText: cfg.burnText },
+      { width: 1080, height: 1920, fps: 25, secondsPerImage: 2, burnText: true },
+    );
+
+    const clamped = config.resolveVideoConfig({ width: 1, height: 999999, fps: 0, secondsPerImage: -1 });
+    assert.equal(clamped.width, 320);
+    assert.equal(clamped.height, 4096);
+    assert.equal(clamped.fps, 1);
+    assert.equal(clamped.secondsPerImage, 0.5);
+
+    assert.equal(config.resolveVideoConfig({ burnText: false }).burnText, false);
+    assert.equal(config.resolveVideoConfig({ fontFamily: 'SimHei' }).fontFamily, 'SimHei');
+  });
+});
+
+describe('buildVideos（真实 ffmpeg）', () => {
+  const smallCfg = { width: 320, height: 568, fps: 10, secondsPerImage: 1, burnText: true, fontFamily: 'Arial' };
+
+  test('生成章节视频（每个章节一个文件，不含合集）', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const a = await media.processImage(await makeImage({ width: 400, height: 300 }), { sectionSeq: 1, itemSeq: 1 });
+    const b = await media.processImage(await makeImage({ width: 300, height: 400, color: { r: 20, g: 160, b: 90 } }), { sectionSeq: 2, itemSeq: 1 });
+
+    const state = {
+      title: '视频测试',
+      sections: [
+        { seq: 1, name: '主舞台', items: [{ seq: 1, text: '背景板：香槟金', images: [a], audio: null }] },
+        { seq: 2, name: '迎宾区', items: [{ seq: 1, text: '迎宾牌', images: [b], audio: null }] },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: smallCfg });
+    assert.equal(result.count, 2, '两个章节各一个视频');
+    assert.equal(result.missing.length, 0);
+    assert.deepEqual(result.files.map((f) => f.kind), ['section', 'section']);
+
+    const names = result.files.map((f) => f.name);
+    assert.ok(names.includes('01-主舞台.mp4'), `缺章节文件：${names.join(', ')}`);
+    assert.ok(names.includes('02-迎宾区.mp4'), `缺章节文件：${names.join(', ')}`);
+
+    for (const f of result.files) {
+      const onDisk = path.join(config.EXPORTS_DIR, 'videos', f.name);
+      const stat = await fs.stat(onDisk);
+      assert.ok(stat.size > 1000, `${f.name} 太小：${stat.size}`);
+    }
+  });
+
+  test('无图条目被跳过、缺图记录进 missing', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const a = await media.processImage(await makeImage(), { sectionSeq: 3, itemSeq: 1 });
+    const state = {
+      title: '缺图测试',
+      sections: [
+        {
+          seq: 1,
+          name: 'A',
+          items: [
+            { seq: 1, text: '正常', images: [a], audio: null },
+            { seq: 2, text: '无图', images: [], audio: null },
+            { seq: 3, text: '缺图', images: [{ file: 'images/ghost.jpg', w: 10, h: 10 }], audio: null },
+          ],
+        },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: smallCfg });
+    assert.equal(result.count, 1, '只有一个章节有可渲染内容');
+    assert.ok(result.missing.includes('images/ghost.jpg'));
+  });
+
+  test('无图清单返回 422', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+    await assert.rejects(
+      () => video.buildVideos({ state: { title: '空', sections: [{ seq: 1, name: 'A', items: [{ seq: 1, text: 'x', images: [] }] }] }, config: smallCfg }),
+      (err) => err.status === 422,
+    );
+  });
+
+  test('mode=items：每个条目一个视频', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const a = await media.processImage(await makeImage(), { sectionSeq: 4, itemSeq: 1 });
+    const b = await media.processImage(await makeImage({ color: { r: 10, g: 10, b: 200 } }), { sectionSeq: 4, itemSeq: 2 });
+    const state = {
+      title: '条目测试',
+      sections: [
+        {
+          seq: 1,
+          name: '主舞台',
+          items: [
+            { seq: 1, text: '背景板', images: [a], audio: null },
+            { seq: 2, text: '通道花艺', images: [b], audio: null },
+          ],
+        },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: smallCfg, mode: 'items' });
+    assert.equal(result.mode, 'items');
+    assert.equal(result.count, 2);
+    assert.ok(result.files.every((f) => f.kind === 'item'));
+    assert.deepEqual(
+      result.files.map((f) => f.name).sort(),
+      ['01-01-背景板.mp4', '01-02-通道花艺.mp4'],
+    );
+
+    for (const f of result.files) {
+      const onDisk = path.join(config.EXPORTS_DIR, 'videos', f.name);
+      const stat = await fs.stat(onDisk);
+      assert.ok(stat.size > 1000, `${f.name} 太小：${stat.size}`);
+    }
+  });
+
+  test('mode=all：全部条目合并成一个视频', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const a = await media.processImage(await makeImage(), { sectionSeq: 5, itemSeq: 1 });
+    const b = await media.processImage(await makeImage({ color: { r: 0, g: 100, b: 0 } }), { sectionSeq: 5, itemSeq: 2 });
+    const state = {
+      title: '合集测试',
+      sections: [
+        {
+          seq: 1,
+          name: '主舞台',
+          items: [
+            { seq: 1, text: '第一张', images: [a], audio: null },
+            { seq: 2, text: '第二张', images: [b], audio: null },
+          ],
+        },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: smallCfg, mode: 'all' });
+    assert.equal(result.mode, 'all');
+    assert.equal(result.count, 1);
+    assert.equal(result.files[0].kind, 'all');
+    assert.equal(result.files[0].name, '合集测试-全部.mp4');
+  });
+
+  test('itemId：只导出单个条目，且不清空目录', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const a = await media.processImage(await makeImage(), { sectionSeq: 6, itemSeq: 1 });
+    const b = await media.processImage(await makeImage({ color: { r: 10, g: 10, b: 200 } }), { sectionSeq: 6, itemSeq: 2 });
+    const state = {
+      title: '单条测试',
+      sections: [
+        {
+          seq: 1,
+          name: '主舞台',
+          items: [
+            { id: 'i_single', seq: 1, text: '背景板', images: [a], audio: null },
+            { id: 'i_other', seq: 2, text: '通道花艺', images: [b], audio: null },
+          ],
+        },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: smallCfg, itemId: 'i_single' });
+    assert.equal(result.mode, 'items');
+    assert.equal(result.count, 1);
+    assert.equal(result.files[0].kind, 'item');
+    assert.equal(result.files[0].name, '01-01-背景板.mp4');
+
+    // 不存在的条目返回 404
+    await assert.rejects(
+      () => video.buildVideos({ state, config: smallCfg, itemId: 'i_nope' }),
+      (err) => err.status === 404,
+    );
+  });
+
+  test('多图条目：画册布局（大图 + 缩略图 swiper）来回循环滑动，产出合法 mp4', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const multiCfg = { ...smallCfg, secondsPerImage: 1, transSeconds: 0.4 };
+    const a = await media.processImage(await makeImage({ width: 400, height: 300 }), { sectionSeq: 7, itemSeq: 1 });
+    const b = await media.processImage(await makeImage({ width: 300, height: 400, color: { r: 20, g: 160, b: 90 } }), { sectionSeq: 7, itemSeq: 1 });
+    const c = await media.processImage(await makeImage({ width: 500, height: 400, color: { r: 200, g: 60, b: 20 } }), { sectionSeq: 7, itemSeq: 1 });
+
+    const state = {
+      title: '多图测试',
+      sections: [
+        {
+          seq: 1,
+          name: '主舞台',
+          items: [{ seq: 1, text: '三张图的条目', images: [a, b, c], audio: null }],
+        },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: multiCfg, mode: 'items' });
+    assert.equal(result.count, 1);
+    assert.equal(result.files[0].kind, 'item');
+    assert.equal(result.files[0].name, '01-01-三张图的条目.mp4');
+
+    const onDisk = path.join(config.EXPORTS_DIR, 'videos', result.files[0].name);
+    const stat = await fs.stat(onDisk);
+    assert.ok(stat.size > 2000, `多图视频太小：${stat.size}`);
+
+    // 无语音：来回 2 轮 = seq [0,1,2,1,0,1,2,1]，8 停留 + 7 过渡 = 8×1 + 7×0.4 = 10.8s
+    const { execa } = await import('execa');
+    const { stdout } = await execa(config.BIN.ffprobe, [
+      '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', onDisk,
+    ]);
+    const duration = Number.parseFloat(stdout);
+    assert.ok(Math.abs(duration - 10.8) < 1.0, `时长应为约 10.8s，实际 ${duration}`);
+  });
+
+  test('章节视频：多条目之间有中央标题过渡，进度条区分条目', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const a = await media.processImage(await makeImage({ width: 400, height: 300 }), { sectionSeq: 8, itemSeq: 1 });
+    const b = await media.processImage(await makeImage({ width: 300, height: 400, color: { r: 20, g: 160, b: 90 } }), { sectionSeq: 8, itemSeq: 2 });
+
+    const state = {
+      title: '章节测试',
+      sections: [
+        {
+          seq: 1,
+          name: '主舞台',
+          items: [
+            { seq: 1, title: '背景板', text: '背景板：香槟金', images: [a], audio: null },
+            { seq: 2, title: '花艺', text: '两侧花艺', images: [b], audio: null },
+          ],
+        },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: smallCfg, mode: 'sections' });
+    assert.equal(result.count, 1);
+    assert.equal(result.files[0].kind, 'section');
+    assert.equal(result.files[0].name, '01-主舞台.mp4');
+
+    const onDisk = path.join(config.EXPORTS_DIR, 'videos', result.files[0].name);
+    assert.ok((await fs.stat(onDisk)).size > 2000);
+
+    // 单图条目各 1s + 两个中央标题过渡各 0.9s = 1+0.9+1+0.9 = 3.8s
+    const { execa } = await import('execa');
+    const { stdout } = await execa(config.BIN.ffprobe, [
+      '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', onDisk,
+    ]);
+    const duration = Number.parseFloat(stdout);
+    assert.ok(Math.abs(duration - 3.8) < 0.6, `时长应为约 3.8s（含标题过渡），实际 ${duration}`);
+  });
+});

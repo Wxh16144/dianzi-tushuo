@@ -1,0 +1,68 @@
+{
+  "name": "dianzi-tushuo",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "电子图说 · 语音布置清单：图片 + 文案 + 语音的清单工具，一键导出 PDF / Zip",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "start:open": "node server/index.js --open",
+    "dev": "node --watch server/index.js",
+    "dev:open": "node --watch server/index.js --open",
+    "test": "node --test \"test/*.test.js\"",
+    "test:watch": "node --test --watch \"test/*.test.js\"",
+    "test:unit": "node --test test/config.test.js test/schema.test.js test/media.test.js test/export.test.js",
+    "test:api": "node --test test/api.test.js",
+    "test:e2e": "node --test test/export-e2e.test.js",
+    "open-data": "open data",
+    "open-exports": "open exports",
+    "logs": "sh -c 'ls -t data/logs/*.log | head -1 | xargs tail -n 100 -f'",
+    "clean": "node scripts/clean.js",
+    "clean:run": "node scripts/clean.js --yes",
+    "clean:all": "node scripts/clean.js --all --yes",
+    "stt:download": "node scripts/stt-download.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "archiver": "^7.0.1",
+    "commander": "^14.0.3",
+    "compression": "^1.8.2",
+    "dayjs": "^1.11.23",
+    "dotenv": "^18.0.9",
+    "execa": "^10.2.1",
+    "express": "^5.3.0",
+    "http-errors": "^2.0.1",
+    "lowdb": "^7.0.1",
+    "mime-types": "^3.0.2",
+    "multer": "^2.0.2",
+    "nanoid": "^6.0.2",
+    "open": "^11.0.4",
+    "picocolors": "^1.1.1",
+    "pino": "^10.4.0",
+    "pino-http": "^11.0.0",
+    "pino-pretty": "^13.2.0",
+    "pino-roll": "^4.0.0",
+    "puppeteer-core": "^24.0.0",
+    "read-last-lines": "^1.10.0",
+    "sharp": "^0.33.5",
+    "which": "^6.0.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.1"
+  },
+  "keywords": [
+    "express",
+    "lowdb",
+    "zod",
+    "pino",
+    "sharp",
+    "puppeteer",
+    "pdf",
+    "whisper",
+    "mlx"
+  ],
+  "license": "MIT"
+}
