@@ -8,9 +8,9 @@
 
 ## Demo
 
-下面这条视频就是用它自己生成的（截图 + 配音 + 文案字幕，自动合成）。点击图片查看演示：
+下面这条视频就是用它自己生成的（截图 + 配音 + 文案字幕，自动合成）：
 
-[![Demo 演示视频](docs/demo/demo-cover.png)](docs/demo/demo.mp4)
+https://github.com/user-attachments/assets/1a207ff9-dd46-4e12-bd8d-f4476ff10cfc
 
 ## 快速开始
 
