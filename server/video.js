@@ -13,7 +13,7 @@ const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
 /** TTS 朗读时每个换行处插入的停顿时长（毫秒），用 macOS say 的 [[slnc N]] 内嵌指令 */
 const TTS_NEWLINE_PAUSE_MS = 400;
 /** 片段封装版本：只用于「输入没变但代码逻辑变了」，改常量请依赖各自的签名函数 */
-const CLIP_FORMAT_VERSION = 2;
+const CLIP_FORMAT_VERSION = 3;
 
 /**
  * 渲染常量：都会改变输出字节，因此全部参与所属层的缓存签名。
@@ -28,6 +28,8 @@ const RENDER = {
   titleSoundFilter: 'highpass=f=350,lowpass=f=2600,volume=0.35,afade=t=in:st=0:d=0.08,afade=t=out:st=0.28:d=0.12',
   /** 进度条几何与配色 */
   progress: { margin: 16, barHeight: 44, color: '0x2f6df6' },
+  /** 中间帧 JPEG 参数：这些帧随后会被 x264 重编码，mozjpeg 的额外耗时不划算 */
+  frameJpeg: { quality: 90 },
 };
 
 const badRequest = (message, status) => Object.assign(new Error(message), { status });
@@ -49,6 +51,7 @@ function videoLayerSig(cfg) {
   return [
     cfg.width, cfg.height, cfg.fps, cfg.secondsPerImage, cfg.transSeconds,
     cfg.burnText ? 1 : 0, cfg.fontFamily,
+    RENDER.frameJpeg.quality,
   ].join('|');
 }
 
@@ -633,7 +636,7 @@ export async function renderFrame(inputPath, outputPath, { width, height, burnTe
   }
   await sharp({ create: { width, height, channels: 3, background: { r: 0, g: 0, b: 0 } } })
     .composite(composites)
-    .jpeg({ quality: 90, mozjpeg: true })
+    .jpeg(RENDER.frameJpeg)
     .toFile(outputPath);
 }
 
@@ -658,10 +661,20 @@ function thumbBorderSvg(w, h, color, radius = 10, strokeWidth = 2) {
 }
 
 /**
+ * 缩略图结果缓存：每帧都要重建整条缩略图条，同一张图在相同尺寸/高亮状态下结果必然相同。
+ * 只在单次导出内有效（buildVideos 清空），因此不参与缓存签名。
+ */
+const thumbTileCache = new Map();
+
+/**
  * 缩略图卡片：object-fit: contain 的感觉 —— 整张图完整放进卡片（不裁切），
  * 深色底 + 圆角边框；当前项高亮边框、其余淡色边框。
  */
 async function thumbTile(imagePath, w, h, active) {
+  const cacheKey = `${imagePath}|${w}x${h}|${active ? 1 : 0}`;
+  const cached = thumbTileCache.get(cacheKey);
+  if (cached) return cached;
+
   const bg = { r: 16, g: 18, b: 24 };
   const stroke = active ? 4 : 2;
   const pad = active ? 9 : 7; // 内边距（含边框宽度），图片不贴边框
@@ -675,13 +688,16 @@ async function thumbTile(imagePath, w, h, active) {
   const borderPng = await sharp(Buffer.from(thumbBorderSvg(w, h, color, 10, stroke))).png().toBuffer();
 
   // 底图 + 图片 + 边框一次 composite，避免透明层分次叠加变黑
-  return sharp({ create: { width: w, height: h, channels: 3, background: bg } })
+  const tile = await sharp({ create: { width: w, height: h, channels: 3, background: bg } })
     .composite([
       { input: inner, top: pad, left: pad },
       { input: borderPng, top: 0, left: 0 },
     ])
     .png()
     .toBuffer();
+
+  thumbTileCache.set(cacheKey, tile);
+  return tile;
 }
 
 /** 渲染一帧「画册停留」：大图区 contain 当前图 + 底部缩略图条（当前高亮）+ 计数角标 + 可选字幕 */
@@ -720,7 +736,7 @@ export async function renderGalleryStill(outputPath, { layout, images, aspects, 
     create: { width, height, channels: 3, background: { r: 16, g: 18, b: 24 } },
   })
     .composite(composites)
-    .jpeg({ quality: 90, mozjpeg: true })
+    .jpeg(RENDER.frameJpeg)
     .toFile(outputPath);
 }
 
@@ -781,7 +797,7 @@ export async function renderGalleryTransition(outputPath, { layout, images, aspe
     create: { width, height, channels: 3, background: { r: 16, g: 18, b: 24 } },
   })
     .composite(composites)
-    .jpeg({ quality: 90, mozjpeg: true })
+    .jpeg(RENDER.frameJpeg)
     .toFile(outputPath);
 }
 
@@ -1240,7 +1256,7 @@ async function buildTitleClip({ title, subtitle, cfg, tmpDir, cacheDir }) {
 
   await sharp({ create: { width, height, channels: 3, background: { r: 16, g: 18, b: 24 } } })
     .composite([{ input: overlay, top: 0, left: 0 }])
-    .jpeg({ quality: 90, mozjpeg: true })
+    .jpeg(RENDER.frameJpeg)
     .toFile(frame);
 
   // 标题过渡带一个轻切换音效；音效短于标题时长，末尾自动补静音
@@ -1296,6 +1312,7 @@ export async function buildVideos({ state, config: configOverride, mode: modeInp
   }
 
   const tmpDir = await fsp.mkdtemp(path.join(TMP_DIR, 'video-'));
+  thumbTileCache.clear();
   const missing = new Set();
   let skippedItems = 0;
 
