@@ -584,6 +584,41 @@ function renderTitle() {
   if (document.activeElement !== dom.titleInput) dom.titleInput.value = title;
 }
 
+/** 构造视频配音来源下拉（auto / 录音 / TTS），TTS 不可用时禁用该选项 */
+function buildAudioSourceSelect() {
+  const audioSelect = el('select', 'audio-source');
+  audioSelect.title = '视频配音来源';
+  const options = [
+    ['auto', '配音：自动'],
+    ['recording', '配音：录音'],
+    ['tts', '配音：TTS'],
+  ];
+  for (const [value, label] of options) {
+    const opt = el('option', null, label);
+    opt.value = value;
+    if (value === 'tts' && !S.ttsReady) opt.disabled = true;
+    audioSelect.append(opt);
+  }
+  audioSelect.value = S.audioSource;
+  audioSelect.addEventListener('change', () => {
+    S.audioSource = audioSelect.value;
+  });
+  return audioSelect;
+}
+
+/** checkHealth 拿到 say 可用性后，刷新下拉里的 TTS 选项与当前值（不重建整个页签栏） */
+function refreshAudioSourceSelect() {
+  const select = dom.tabs.querySelector('.audio-source');
+  if (!select) return;
+  const ttsOpt = select.querySelector('option[value="tts"]');
+  if (ttsOpt) ttsOpt.disabled = !S.ttsReady;
+  // 若当前选中了不可用的 TTS 且本机不支持，回退到 auto
+  if (!S.ttsReady && select.value === 'tts') {
+    S.audioSource = 'auto';
+  }
+  select.value = S.audioSource;
+}
+
 function renderTabs() {
   dom.tabs.replaceChildren();
   S.data.sections.forEach((section, index) => {
@@ -628,24 +663,7 @@ function renderTabs() {
     dom.tabs.append(add);
 
     // 视频语音来源选择（auto / 录音 / TTS）
-    const audioSelect = el('select', 'audio-source');
-    audioSelect.title = '视频配音来源';
-    const options = [
-      ['auto', '配音：自动'],
-      ['recording', '配音：录音'],
-      ['tts', '配音：TTS'],
-    ];
-    for (const [value, label] of options) {
-      const opt = el('option', null, label);
-      opt.value = value;
-      if (value === 'tts' && !S.ttsReady) opt.disabled = true;
-      audioSelect.append(opt);
-    }
-    audioSelect.value = S.audioSource;
-    audioSelect.addEventListener('change', () => {
-      S.audioSource = audioSelect.value;
-    });
-    dom.tabs.append(audioSelect);
+    dom.tabs.append(buildAudioSourceSelect());
 
     const tabExport = el('button', 'tab-export', '⏺ 导出视频');
     tabExport.type = 'button';
@@ -2361,6 +2379,7 @@ async function checkHealth() {
     if (health.video?.audioSource && ['auto', 'recording', 'tts'].includes(health.video.audioSource)) {
       S.audioSource = health.video.audioSource;
     }
+    refreshAudioSourceSelect();
   } catch {
     /* 忽略 */
   }
