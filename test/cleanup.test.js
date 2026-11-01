@@ -292,4 +292,39 @@ describe('scripts/clean.js 端到端', () => {
     assert.equal(result.exitCode, 1);
     assert.match(output(result), /必须额外加 --force/);
   });
+
+  test('--all 默认连内容缓存一起清空，--no-cache 可跳过', async () => {
+    const dir = path.join(sandbox, 'all-cache');
+    await fs.mkdir(path.join(dir, 'images'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'audio'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'cache'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'images/a.jpg'), 'img');
+    await fs.writeFile(path.join(dir, 'cache/videos.mp4'), 'cached');
+    await fs.writeFile(path.join(dir, 'state.json'), JSON.stringify({ title: 't', sections: [] }));
+
+    const env = {
+      ...process.env,
+      DATA_DIR: dir,
+      EXPORTS_DIR: path.join(dir, 'exports'),
+      LOG_LEVEL: 'silent',
+    };
+
+    // --all --yes --force：应清空 cache
+    const result = await execa(process.execPath, ['scripts/clean.js', '--all', '--yes', '--force'], {
+      env, cwd: process.cwd(), reject: false,
+    });
+    assert.equal(result.exitCode, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /已清空内容缓存/);
+    await assert.rejects(fs.access(path.join(dir, 'cache/videos.mp4')), /ENOENT/, '--all 应清空缓存');
+
+    // 重新造一个 cache，验证 --all --no-cache 保留缓存
+    await fs.mkdir(path.join(dir, 'cache'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'cache/again.mp4'), 'cached-again');
+    await fs.writeFile(path.join(dir, 'images/a.jpg'), 'img');
+    const noCache = await execa(process.execPath, ['scripts/clean.js', '--all', '--no-cache', '--yes', '--force'], {
+      env, cwd: process.cwd(), reject: false,
+    });
+    assert.equal(noCache.exitCode, 0, `${noCache.stdout}\n${noCache.stderr}`);
+    assert.ok((await fs.readdir(path.join(dir, 'cache'))).includes('again.mp4'), '--no-cache 应保留缓存');
+  });
 });

@@ -124,6 +124,8 @@ async function ask(question) {
 
 async function runClean(options) {
   const mode = options.all ? 'all' : 'orphans';
+  // --all 语义是「全部」，默认连内容缓存一起清；--no-cache 可在 --all 时跳过缓存清理
+  const clearCache = options.all ? options.cache !== false : Boolean(options.cache);
 
   line('═');
   console.log(pc.bold('  电子图说 · 清理工具'));
@@ -182,10 +184,10 @@ async function runClean(options) {
     });
   }
 
-  // 转写 / 描述 / 音频转码的内容缓存（可安全清空，下次会按需重建）
-  const cacheBytes = options.cache ? await dirSize(CACHE_DIR) : 0;
-  if (options.cache) {
-    extra.push({ label: '内容缓存（转写/描述/转码）', bytes: cacheBytes, hint: CACHE_DIR });
+  // 内容缓存（转写/描述/视频片段/TTS），可安全清空，下次会按需重建
+  const cacheBytes = clearCache ? await dirSize(CACHE_DIR) : 0;
+  if (clearCache) {
+    extra.push({ label: '内容缓存（转写/描述/视频/TTS）', bytes: cacheBytes, hint: CACHE_DIR });
   }
   if (extra.length) {
     console.log('');
@@ -260,9 +262,9 @@ async function runClean(options) {
     for (const file of brokenBlobs) await fs.rm(file, { force: true }).catch(() => {});
     console.log(pc.dim(`  已清理 ${brokenBlobs.length} 个未完成模型分片，下次转写会重新下载`));
   }
-  if (options.cache) {
+  if (clearCache) {
     await fs.rm(CACHE_DIR, { recursive: true, force: true }).catch(() => {});
-    console.log(pc.dim(`  已清空内容缓存（释放约 ${formatBytes(cacheBytes)}），下次转写/转码会重新生成`));
+    console.log(pc.dim(`  已清空内容缓存（释放约 ${formatBytes(cacheBytes)}），下次转写/转码/生成视频会重新生成`));
   }
 
   line();
@@ -290,12 +292,13 @@ program
   .version(version, '-v, --version', '显示版本号')
   .description('清理 data 目录（危险操作：默认只演练，删除前会整体备份）')
   .option('-y, --yes', '真正执行删除（默认只演练，不删任何文件）')
-  .option('-a, --all', '删除全部媒体，而不是只删孤儿文件')
+  .option('-a, --all', '删除全部媒体（清单里的图片/音频会失效），并默认清空内容缓存')
   .option('-w, --workdir <dir>', '工作区目录（默认当前目录，也可用 WORK_DIR 环境变量）')
   .option('--logs', '顺便清空 data/logs')
   .option('--exports', '顺便清空 exports/')
   .option('--model-cache', '清掉 whisper 模型里下载中断的 .incomplete 分片')
-  .option('--cache', '清空内容缓存（转写 / 描述 / 音频转码）')
+  .option('--cache', '清空内容缓存（转写 / 描述 / 视频片段 / TTS）')
+  .option('--no-cache', '不清内容缓存（仅 --all 时有用，跳过缓存清理）')
   .option('--backup-dir <dir>', '备份目录（支持 ~ 与 $VAR）', DEFAULT_BACKUP_BASE)
   .option('--no-backup', '跳过备份（--all 时无效，--all 永远备份）')
   .option('--force', '非交互环境（脚本/CI）执行 --all 时必须加，跳过手打确认')
@@ -305,18 +308,20 @@ program
 示例：
   $ npm run clean                          # 演练，只看会删什么
   $ npm run clean:run                      # 删除孤儿文件
-  $ npm run clean:all                      # 删除全部媒体（需手打 DELETE ALL）
+  $ npm run clean:all                      # 删除全部媒体 + 内容缓存（需手打 DELETE ALL）
   $ npm run clean -- --logs --exports      # 顺便清空日志与历史导出
   $ npm run clean -- --model-cache --yes   # 清掉 whisper 下载中断的残片
-  $ npm run clean -- --cache --yes         # 清空转写/描述/转码的内容缓存
-  $ npm run clean -- --all --yes --force   # CI 里删除全部媒体
+  $ npm run clean -- --cache --yes         # 清空转写/描述/视频/TTS 的内容缓存
+  $ npm run clean -- --all --no-cache --yes --force  # 删全部媒体但保留缓存
+  $ npm run clean -- --all --yes --force   # CI 里删除全部媒体 + 缓存
   $ npm run clean -- --workdir /path/to/workspace --yes   # 清理指定工作区
 
 安全说明：
   · 不加 --yes 绝不删除文件
   · 删除前把整个 data 目录备份到临时目录，并打印恢复命令
   · state.json 解析失败时直接中止，避免误删
-  · 只删 data/images、data/audio，不动 state.json`,
+  · 只删 data/images、data/audio，不动 state.json
+  · --all 默认连 data/cache 一起清（可用 --no-cache 跳过）`,
   )
   .showHelpAfterError()
   .action(async (options) => {
