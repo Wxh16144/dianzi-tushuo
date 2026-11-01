@@ -21,6 +21,7 @@
 npm install
 npm start          # 启动服务，浏览器打开 http://127.0.0.1:3210/
 npm run start:open # 或启动并自动打开浏览器
+npm start -- --host # 局域网可访问，终端会打印手机可用的地址
 ```
 
 默认使用本机 Ollama（无需配置）；想要语音转文字，额外装一个 `mlx-whisper` 即可（见下方文档）。

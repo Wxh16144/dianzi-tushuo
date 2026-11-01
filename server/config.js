@@ -26,6 +26,80 @@ function readWorkdirArg(argv) {
   return undefined;
 }
 
+/* ---------------- 监听地址 ---------------- */
+
+/**
+ * 从命令行参数里解析 `--host`，行为与 Vite 一致：
+ * - `--host`（不带值）→ 监听所有网卡（0.0.0.0），局域网可访问
+ * - `--host=0.0.0.0` / `--host 192.168.1.9` → 指定监听地址
+ */
+function readHostArg(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    const eq = arg.indexOf('=');
+    const key = eq === -1 ? arg : arg.slice(0, eq);
+    if (key === '--host' || key === '-host') {
+      if (eq !== -1) return arg.slice(eq + 1).trim() || true;
+      const next = argv[i + 1];
+      return next && !next.startsWith('-') ? next : true;
+    }
+  }
+  return undefined;
+}
+
+/** 通配地址：监听所有网卡，局域网可访问 */
+export function isWildcardHost(host) {
+  const value = String(host ?? '').trim().toLowerCase();
+  return value === '' || ['0.0.0.0', '::', '*', 'true', 'all', 'lan'].includes(value);
+}
+
+/** 回环地址：只有本机能访问 */
+export function isLoopbackHost(host) {
+  const value = String(host ?? '').trim().toLowerCase();
+  if (value === 'localhost' || value === '::1' || value === '[::1]') return true;
+  return /^127\./.test(value);
+}
+
+/**
+ * 纯函数：算出最终监听地址。
+ * 优先级：`--host` 参数 > `HOST` 环境变量 > 默认 127.0.0.1。
+ */
+export function resolveHost({ cliHost, envHost, fallback = '127.0.0.1' } = {}) {
+  if (cliHost === true) return '0.0.0.0';
+  const raw = String(cliHost ?? envHost ?? '').trim();
+  if (!raw) return fallback;
+  if (['true', 'all', 'lan', '*', '::'].includes(raw.toLowerCase())) return '0.0.0.0';
+  return raw;
+}
+
+/** 本机访问用的展示地址：通配地址显示成 localhost */
+export function displayHost(host) {
+  return isWildcardHost(host) ? 'localhost' : String(host);
+}
+
+/**
+ * 列出本机可用于局域网访问的 IPv4 地址。
+ * 会排除：回环 / 内部接口、链路本地地址（169.254.x）、常见虚拟网卡（VPN / 容器 / 虚拟机）。
+ * 结果按私网地址优先排序，方便用户直接拿第一个去手机里打开。
+ */
+export function lanAddresses(interfaces = os.networkInterfaces()) {
+  const VIRTUAL_IFACE = /^(utun|awdl|llw|anpi|bridge|docker|veth|vmnet|vboxnet|tun|tap|zt|tailscale|wg)/i;
+  const isPrivate = (ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
+
+  const found = new Set();
+  for (const [name, entries] of Object.entries(interfaces)) {
+    if (VIRTUAL_IFACE.test(name)) continue;
+    for (const net of entries || []) {
+      if (!net || net.internal) continue;
+      const family = typeof net.family === 'string' ? net.family : `IPv${net.family}`;
+      if (family !== 'IPv4') continue;
+      if (net.address.startsWith('169.254.')) continue;
+      found.add(net.address);
+    }
+  }
+  return [...found].sort((a, b) => Number(isPrivate(b)) - Number(isPrivate(a)));
+}
+
 /* ---------------- 路径 ---------------- */
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
@@ -329,7 +403,7 @@ export const VIDEO_TTS_VOICE = VIDEO.ttsVoice;
 
 export const SERVER = {
   port: env.PORT,
-  host: env.HOST,
+  host: resolveHost({ cliHost: readHostArg(process.argv), envHost: env.HOST }),
   openBrowser: env.OPEN || process.argv.includes('--open'),
   logLevel: env.LOG_LEVEL,
 };

@@ -1,6 +1,15 @@
 import pc from 'picocolors';
 import open from 'open';
-import { describeEnv, DOTENV, SERVER, WORKDIR } from './config.js';
+import {
+  describeEnv,
+  displayHost,
+  DOTENV,
+  isLoopbackHost,
+  isWildcardHost,
+  lanAddresses,
+  SERVER,
+  WORKDIR,
+} from './config.js';
 import { ensureDirs, initDb } from './db.js';
 import { createApp } from './app.js';
 import { log } from './logger.js';
@@ -14,13 +23,28 @@ async function main() {
   for (const line of describeEnv().split('\n')) log.env.info(line.trim());
 
   const app = createApp();
-  const url = `http://${SERVER.host === '0.0.0.0' ? 'localhost' : SERVER.host}:${SERVER.port}/`;
+  const port = SERVER.port;
+  const url = `http://${displayHost(SERVER.host)}:${port}/`;
+  const lanUrls = isWildcardHost(SERVER.host)
+    ? lanAddresses().map((ip) => `http://${ip}:${port}/`)
+    : isLoopbackHost(SERVER.host)
+      ? []
+      : [url];
 
-  const server = app.listen(SERVER.port, SERVER.host, async () => {
+  const server = app.listen(port, SERVER.host, async () => {
     console.log('');
     console.log(`  ${pc.bold('电子图说')}  ${pc.cyan(url)}`);
     console.log(`  ${pc.dim('只读视图')}  ${pc.cyan(`${url}?readonly=1`)}`);
-    console.log(`  ${pc.dim('工作区')}  ${WORKDIR}`);
+    for (const lanUrl of lanUrls) {
+      console.log(`  ${pc.dim('局域网')}    ${pc.cyan(lanUrl)}`);
+    }
+    if (!lanUrls.length) {
+      const hint = isLoopbackHost(SERVER.host)
+        ? '仅本机可访问，加 --host（或 HOST=0.0.0.0）可让手机 / 平板打开'
+        : '未发现可用的局域网 IPv4 地址，检查网络连接';
+      console.log(`  ${pc.dim('局域网')}    ${pc.dim(hint)}`);
+    }
+    console.log(`  ${pc.dim('工作区')}    ${WORKDIR}`);
     console.log('');
 
     if (SERVER.openBrowser) {
