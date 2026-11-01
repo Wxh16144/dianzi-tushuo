@@ -22,6 +22,20 @@ npm run start:open # 或启动并自动打开浏览器
 
 默认使用本机 Ollama（无需配置）；想要语音转文字，额外装一个 `mlx-whisper` 即可（见下方文档）。
 
+## 环境准备
+
+| 组件 | 是否必须 | 用途 | 安装 |
+| --- | --- | --- | --- |
+| Node.js ≥ 22.9 | **必须** | 运行服务 | [nodejs.org](https://nodejs.org/) |
+| ffmpeg（含 ffprobe） | **必须** | 视频合成、录音转码 | `brew install ffmpeg` · [其它平台](https://ffmpeg.org/download.html) |
+| Chrome / Chromium | 导出 PDF 时 | 渲染 A4 PDF | [google.com/chrome](https://www.google.com/chrome/) |
+| Ollama | 可选 | 默认本地 LLM | [ollama.com](https://ollama.com/) |
+| mlx-whisper | 可选 | 语音转文字（Apple Silicon） | `pipx install mlx-whisper --python python3.13` |
+| `say` | 无需安装 | TTS 配音（macOS 内置） | — |
+
+缺少的可执行文件不影响启动，只会让对应功能给出提示。装在非标准路径时可用
+`FFMPEG_PATH` / `CHROME_PATH` / `WHISPER_BIN` 指定，详见 [配置](docs/配置.md)。
+
 ## 基本用法
 
 | 想做什么 | 怎么做 |
