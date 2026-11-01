@@ -693,6 +693,10 @@ function renderTabs() {
     // 视频语音来源选择（auto / 录音 / TTS）
     dom.tabs.append(buildAudioSourceSelect());
 
+    // TODO(视频开关)：字幕 / 进度条开关接到这里。
+    // 值存 localStorage 并随请求体发送；后端 buildVideos 已预留 cfg.burnText / cfg.progressBar，
+    // 两个参数都已在缓存签名里，接线后不需要改缓存逻辑。
+
     const tabExport = el('button', 'tab-export', '⏺ 导出视频');
     tabExport.type = 'button';
     tabExport.title = '把每个章节各导出一个视频';

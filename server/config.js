@@ -257,6 +257,7 @@ export function resolveVideoConfig({
   secondsPerImage = 2,
   transSeconds = 0.5,
   burnText = true,
+  progressBar = true,
   fontFamily = '',
   audioSource = 'auto',
   ttsVoice = 'Tingting',
@@ -273,6 +274,8 @@ export function resolveVideoConfig({
     secondsPerImage: clamp(secondsPerImage, 0.5, 60, 2),
     transSeconds: clamp(transSeconds, 0, 5, 0.5),
     burnText: burnText !== false,
+    // TODO(视频开关)：接前端后可由请求体覆盖；目前只由配置决定
+    progressBar: progressBar !== false,
     fontFamily: String(fontFamily || '').trim() || DEFAULT_CJK_FONT_FAMILY,
     audioSource: source,
     ttsVoice: String(ttsVoice || '').trim() || 'Tingting',

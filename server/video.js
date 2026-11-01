@@ -10,16 +10,25 @@ import { log } from './logger.js';
 import { probeDuration } from './media.js';
 
 const FFMPEG_TIMEOUT_MS = 10 * 60 * 1000;
-/** 章节/合集视频里，条目之间的中央标题过渡停留时长 */
-const TITLE_CARD_SECONDS = 0.9;
-/** 标题过渡的轻切换音效时长（whoosh，放在过渡开头，剩余时长自然静音） */
-const TITLE_SOUND_SECONDS = 0.4;
-/** 标题过渡音效缓存文件名（音效固定，缓存一次即可） */
-const TITLE_SOUND_FILE = 'transition-whoosh.m4a';
 /** TTS 朗读时每个换行处插入的停顿时长（毫秒），用 macOS say 的 [[slnc N]] 内嵌指令 */
 const TTS_NEWLINE_PAUSE_MS = 400;
-/** 片段封装版本：音频补齐方式/封装参数变更时递增，让旧缓存片段失效 */
+/** 片段封装版本：只用于「输入没变但代码逻辑变了」，改常量请依赖各自的签名函数 */
 const CLIP_FORMAT_VERSION = 2;
+
+/**
+ * 渲染常量：都会改变输出字节，因此全部参与所属层的缓存签名。
+ * 改这里的值，对应缓存自动失效，不需要手动 bump CLIP_FORMAT_VERSION。
+ */
+const RENDER = {
+  /** 标题过渡卡片停留时长（秒） */
+  titleCardSeconds: 0.9,
+  /** 标题过渡音效时长（秒），短于卡片时长，末尾补静音 */
+  titleSoundSeconds: 0.4,
+  /** 音效合成滤镜：粉红噪声 bandpass + 淡入淡出 */
+  titleSoundFilter: 'highpass=f=350,lowpass=f=2600,volume=0.35,afade=t=in:st=0:d=0.08,afade=t=out:st=0.28:d=0.12',
+  /** 进度条几何与配色 */
+  progress: { margin: 16, barHeight: 44, color: '0x2f6df6' },
+};
 
 const badRequest = (message, status) => Object.assign(new Error(message), { status });
 
@@ -32,29 +41,39 @@ function hashStr(input) {
   return createHash('sha1').update(String(input)).digest('hex').slice(0, 20);
 }
 
-/** 视频「画面」配置签名：只含影响画面的项，不含音频来源/语音，供无音频视频轨缓存复用 */
-function cfgVideoSig(cfg) {
+/**
+ * 画面层签名：只含影响画面的项，不含音频来源/语音，供无音频视频轨缓存复用。
+ * 「是否烧字幕」放在这里而不是独立一层：字幕与帧在同一次 sharp 合成里渲染，没有独立产物。
+ */
+function videoLayerSig(cfg) {
   return [
     cfg.width, cfg.height, cfg.fps, cfg.secondsPerImage, cfg.transSeconds,
     cfg.burnText ? 1 : 0, cfg.fontFamily,
   ].join('|');
 }
 
-/** 完整配置签名：含音频来源/语音，供最终合成缓存使用 */
-function cfgSig(cfg) {
-  return [cfgVideoSig(cfg), cfg.audioSource, cfg.ttsVoice, CLIP_FORMAT_VERSION].join('|');
+/** 音频层签名：录音来源与 TTS 语音 */
+function audioLayerSig(cfg) {
+  return [cfg.audioSource, cfg.ttsVoice].join('|');
 }
 
-/** 进度条签名：进度条内容/位置变了，缓存就失效 */
-function progressSig(progress) {
-  return progress ? `${progress.labels.join(',')}@${progress.activeIndex}` : '';
+/** item 片段签名 = 画面层 + 音频层 + 封装版本 */
+function clipSig(cfg) {
+  return [videoLayerSig(cfg), audioLayerSig(cfg), CLIP_FORMAT_VERSION].join('|');
+}
+
+/** 标题过渡签名：卡片时长、音效时长与滤镜都会改变输出字节 */
+function titleLayerSig() {
+  return [
+    RENDER.titleCardSeconds, RENDER.titleSoundSeconds, RENDER.titleSoundFilter, CLIP_FORMAT_VERSION,
+  ].join('|');
 }
 
 /**
  * 计算 item 视频片段的缓存 key（纯函数）。
- * 输入 = 图片相对路径 + 各图片文件签名(size:mtime) + 文案 + 标题 + 音频相对路径/签名 + 配置 + 进度条。
+ * 输入 = 图片相对路径 + 各图片文件签名(size:mtime) + 文案 + 标题 + 音频相对路径/签名 + 配置。
  */
-export function itemCacheKey({ imageRels, imageSigs, text, title, audioRel, audioSig, cfg, progress }) {
+export function itemCacheKey({ imageRels, imageSigs, text, title, audioRel, audioSig, cfg }) {
   return hashStr([
     (imageRels ?? []).join('|'),
     (imageSigs ?? []).join('|'),
@@ -62,8 +81,7 @@ export function itemCacheKey({ imageRels, imageSigs, text, title, audioRel, audi
     title ?? '',
     audioRel ?? '',
     audioSig ?? '',
-    cfgSig(cfg),
-    progressSig(progress),
+    clipSig(cfg),
   ].join('\n'));
 }
 
@@ -71,20 +89,38 @@ export function itemCacheKey({ imageRels, imageSigs, text, title, audioRel, audi
  * 计算「无音频视频轨」的缓存 key：与音频完全解耦。
  * 切换 TTS 语音 / 录音时视频轨可复用，只需重新合并音频。
  */
-export function videoItemCacheKey({ imageRels, imageSigs, text, title, cfg, progress }) {
+export function videoItemCacheKey({ imageRels, imageSigs, text, title, cfg }) {
   return hashStr([
     (imageRels ?? []).join('|'),
     (imageSigs ?? []).join('|'),
     text ?? '',
     title ?? '',
-    cfgVideoSig(cfg),
-    progressSig(progress),
+    videoLayerSig(cfg),
+    CLIP_FORMAT_VERSION,
   ].join('\n'));
 }
 
 /** 计算标题过渡片段的缓存 key（标题卡片不含音频，用画面签名） */
 export function titleCacheKey({ title, subtitle, cfg }) {
-  return hashStr([`title:${title}`, `sub:${subtitle}`, cfgVideoSig(cfg), CLIP_FORMAT_VERSION].join('\n'));
+  return hashStr([`title:${title}`, `sub:${subtitle}`, videoLayerSig(cfg), titleLayerSig()].join('\n'));
+}
+
+/**
+ * 计算章节/合集成品的缓存 key（纯函数）。
+ * 片段身份用缓存文件名（自身已是内容哈希），因此条目内容、顺序、标题文案、
+ * 是否叠加进度条任何一项变化都会得到新 key。
+ */
+export function chapterCacheKey({ entries, cfg }) {
+  const itemLabels = (entries ?? []).filter((e) => e.type === 'item').map((e) => e.label ?? '');
+  const withProgress = cfg?.progressBar !== false && itemLabels.length > 1;
+  return hashStr([
+    'chapter',
+    withProgress ? 'progress' : 'plain',
+    (entries ?? []).map((e) => `${e.type}:${path.basename(e.path, '.mp4')}`).join('|'),
+    itemLabels.join('|'),
+    videoLayerSig(cfg),
+    CLIP_FORMAT_VERSION,
+  ].join('\n'));
 }
 
 /** 文件签名：size + mtime，文件变化则缓存失效；不存在返回 null */
@@ -359,37 +395,6 @@ export function buildCounterBadge({ width, height, index, total, fontFamily, fon
 }
 
 /**
- * 顶部斑马纹进度条：横向分段，每段一个条目，交替深浅色，当前段高亮。
- * labels 是每段的显示文字（标题或序号）。单段时返回 null（没必要显示）。
- */
-export function buildProgressBar({ width, height, labels, activeIndex, fontFamily, margin = 16, barHeight = 44 }) {
-  const n = (labels?.length) || 0;
-  if (n <= 1) return null;
-
-  const x0 = Math.round(margin);
-  const x1 = Math.round(width - margin);
-  const gap = 3;
-  const segW = (x1 - x0 - gap * (n - 1)) / n;
-  const y = Math.round(margin);
-  const fontSize = 22;
-
-  const parts = [];
-  for (let i = 0; i < n; i += 1) {
-    const x = x0 + i * (segW + gap);
-    const active = i === Number(activeIndex);
-    const fill = active
-      ? '#2f6df6'
-      : i % 2 === 0
-        ? 'rgba(0,0,0,0.5)'
-        : 'rgba(0,0,0,0.28)';
-    parts.push(`<rect x="${x.toFixed(1)}" y="${y}" width="${segW.toFixed(1)}" height="${barHeight}" rx="9" fill="${fill}"/>`);
-    parts.push(`<text x="${(x + segW / 2).toFixed(1)}" y="${y + barHeight / 2 + Math.round(fontSize * 0.36)}" text-anchor="middle" font-size="${fontSize}" fill="#ffffff" font-family="${escapeXml(fontFamily)}">${escapeXml(labels[i])}</text>`);
-  }
-
-  return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">${parts.join('\n')}</svg>`;
-}
-
-/**
  * 章节/合集视频顶部的「完整进度条」分段底条：横向分段，每段一个条目，
  * 段宽按各条目时长占比（ratios，与 labels 一一对应）分配，斑马纹交替深浅区分不同条目。
  * 每个分段之间用竖立线条分隔（章节标记），强化章节边界。
@@ -610,9 +615,9 @@ export function buildClipArgs({ framePaths, audioPath, total, seg, fps }) {
 
 /* ---------------- 渲染 / 拼接 ---------------- */
 
-/** 把一张图片缩放到目标画布（黑边居中），可选叠加文案字幕与进度条 */
-export async function renderFrame(inputPath, outputPath, { width, height, burnText, fontFamily, text, progressSvg = null }) {
-  // 先 resize 成带黑边的完整底图 buffer，再和字幕/进度条透明层「同一次 composite」，
+/** 把一张图片缩放到目标画布（黑边居中），可选叠加文案字幕 */
+export async function renderFrame(inputPath, outputPath, { width, height, burnText, fontFamily, text }) {
+  // 先 resize 成带黑边的完整底图 buffer，再和字幕透明层「同一次 composite」，
   // 避免透明 overlay 分次 composite 到无 alpha 图时被当成黑色覆盖。
   const base = await sharp(inputPath)
     .rotate()
@@ -626,10 +631,6 @@ export async function renderFrame(inputPath, outputPath, { width, height, burnTe
       composites.push({ input: await sharp(Buffer.from(svg)).png().toBuffer(), top: 0, left: 0 });
     }
   }
-  if (progressSvg) {
-    composites.push({ input: progressSvg, top: 0, left: 0 });
-  }
-
   await sharp({ create: { width, height, channels: 3, background: { r: 0, g: 0, b: 0 } } })
     .composite(composites)
     .jpeg({ quality: 90, mozjpeg: true })
@@ -683,8 +684,8 @@ async function thumbTile(imagePath, w, h, active) {
     .toBuffer();
 }
 
-/** 渲染一帧「画册停留」：大图区 contain 当前图 + 底部缩略图条（当前高亮）+ 计数角标 + 可选字幕/进度条 */
-export async function renderGalleryStill(outputPath, { layout, images, aspects, activeIndex, burnText, fontFamily, text, progressSvg = null }) {
+/** 渲染一帧「画册停留」：大图区 contain 当前图 + 底部缩略图条（当前高亮）+ 计数角标 + 可选字幕 */
+export async function renderGalleryStill(outputPath, { layout, images, aspects, activeIndex, burnText, fontFamily, text }) {
   const width = layout.stage.w;
   const height = layout.thumbBar.y + layout.thumbBar.h;
   const composites = [];
@@ -705,8 +706,7 @@ export async function renderGalleryStill(outputPath, { layout, images, aspects, 
     composites.push({ input: tile, top: t.y, left: t.x });
   }
 
-  // 计数角标「2 / 3」；有进度条时下移避开顶部进度条
-  const badge = buildCounterBadge({ width, height, index: activeIndex, total: layout.thumbs.length, fontFamily, marginTop: progressSvg ? 80 : 28 });
+  const badge = buildCounterBadge({ width, height, index: activeIndex, total: layout.thumbs.length, fontFamily });
   composites.push({ input: await sharp(Buffer.from(badge)).png().toBuffer(), top: 0, left: 0 });
 
   if (burnText) {
@@ -714,9 +714,6 @@ export async function renderGalleryStill(outputPath, { layout, images, aspects, 
     if (svg) {
       composites.push({ input: await sharp(Buffer.from(svg)).png().toBuffer(), top: 0, left: 0 });
     }
-  }
-  if (progressSvg) {
-    composites.push({ input: progressSvg, top: 0, left: 0 });
   }
 
   await sharp({
@@ -731,7 +728,7 @@ export async function renderGalleryStill(outputPath, { layout, images, aspects, 
  * 渲染一帧「画册滑动」：大图按方向横向滑动（正向看下一张左移，反向看上一张右移），
  * 缩略图条里高亮切到目标图。
  */
-export async function renderGalleryTransition(outputPath, { layout, images, aspects, fromIndex, toIndex, t, progressSvg = null, burnText = false, fontFamily = 'Arial', text = '' }) {
+export async function renderGalleryTransition(outputPath, { layout, images, aspects, fromIndex, toIndex, t, burnText = false, fontFamily = 'Arial', text = '' }) {
   const width = layout.stage.w;
   const height = layout.thumbBar.y + layout.thumbBar.h;
   const dir = toIndex > fromIndex ? 1 : -1;
@@ -769,19 +766,15 @@ export async function renderGalleryTransition(outputPath, { layout, images, aspe
   }
 
   // 过渡中也显示目标计数
-  const badge = buildCounterBadge({ width, height, index: toIndex, total: layout.thumbs.length, fontFamily: 'Arial', marginTop: progressSvg ? 80 : 28 });
+  const badge = buildCounterBadge({ width, height, index: toIndex, total: layout.thumbs.length, fontFamily: 'Arial' });
   composites.push({ input: await sharp(Buffer.from(badge)).png().toBuffer(), top: 0, left: 0 });
 
-  // 文案作为固定位置的浮动标签，切换图片时保持不动（和停留帧一致）
+  // 文案作为固定位置的浮动标签，切换图片时保持不動（和停留帧一致）
   if (burnText) {
     const svg = buildCaptionSvg({ width, height, text, fontFamily, bottom: layout.captionBottom });
     if (svg) {
       composites.push({ input: await sharp(Buffer.from(svg)).png().toBuffer(), top: 0, left: 0 });
     }
-  }
-
-  if (progressSvg) {
-    composites.push({ input: progressSvg, top: 0, left: 0 });
   }
 
   await sharp({
@@ -845,10 +838,11 @@ async function muxAudio(videoPath, audioPath, outPath) {
  * 在拼接好的章节/合集视频上叠加「完整进度条」：
  * 底层 = 分段斑马纹（按各条目时长占比），中层 = 单色实时进度条（随时间从左往右推进），
  * 顶层 = 文字标签（带描边，始终可见，不被蓝色进度条盖住）。
- * 视频流重编码，音频流 copy。只有一段时不叠进度条，直接拷贝。
+ * 视频流重编码，音频流 copy。只有一段或关闭进度条时不叠，直接拷贝。
  */
 async function overlayProgressBar({ videoPath, outPath, labels, ratios, cfg, tmpDir }) {
-  if ((labels?.length || 0) <= 1) {
+  // TODO(视频开关)：progressBar 目前只由配置决定，接通前端后改成请求体覆盖 cfg 即可
+  if (cfg.progressBar === false || (labels?.length || 0) <= 1) {
     await fsp.copyFile(videoPath, outPath);
     return;
   }
@@ -860,8 +854,7 @@ async function overlayProgressBar({ videoPath, outPath, labels, ratios, cfg, tmp
   }
 
   const { width, height, fps, fontFamily } = cfg;
-  const margin = 16;
-  const barHeight = 44;
+  const { margin, barHeight, color } = RENDER.progress;
   const barW = Math.max(1, width - margin * 2);
 
   const trackSvg = buildProgressTrack({ width, height, labels, ratios, margin, barHeight });
@@ -882,7 +875,7 @@ async function overlayProgressBar({ videoPath, outPath, labels, ratios, cfg, tmp
       '-i', videoPath,
       '-loop', '1', '-i', trackPng,
       '-f', 'lavfi', '-i', `color=black:s=${barW}x${barHeight}:r=${fps}:d=${total}`,
-      '-f', 'lavfi', '-i', `color=0x2f6df6:s=${barW}x${barHeight}:r=${fps}:d=${total}`,
+      '-f', 'lavfi', '-i', `color=${color}:s=${barW}x${barHeight}:r=${fps}:d=${total}`,
       '-loop', '1', '-i', labelPng,
       '-filter_complex',
       [
@@ -911,36 +904,52 @@ async function overlayProgressBar({ videoPath, outPath, labels, ratios, cfg, tmp
  * 这样分段宽度与实时进度条的时间基准完全对齐。
  */
 async function concatChapter({ entries, outPath, cfg, tmpDir }) {
-  const tmpConcat = path.join(tmpDir, `chapter-${path.basename(outPath)}.mp4`);
+  const key = chapterCacheKey({ entries, cfg });
+  const cachePath = path.join(VIDEO_CACHE_DIR, `${key}.ch.mp4`);
+
+  const cached = await fsp.stat(cachePath).catch(() => null);
+  if (cached && cached.size > 0) {
+    log.video.debug({ key: key.slice(0, 8) }, '命中章节缓存');
+    await fsp.copyFile(cachePath, outPath);
+    return;
+  }
+
+  const base = `chapter-${key.slice(0, 12)}`;
+  const tmpConcat = path.join(tmpDir, `${base}-concat.mp4`);
+  const built = path.join(tmpDir, `${base}.mp4`);
   await concatClips(entries.map((e) => e.path), tmpConcat, tmpDir);
 
   const itemEntries = entries.filter((e) => e.type === 'item');
   if (itemEntries.length <= 1) {
-    await fsp.copyFile(tmpConcat, outPath);
-    return;
+    await fsp.copyFile(tmpConcat, built);
+  } else {
+    const durs = [];
+    for (const e of entries) durs.push(await probeDuration(e.path));
+
+    // 每段 = 前面的 title（若有）+ item，占比按时长算
+    const segs = [];
+    for (let i = 0; i < entries.length; i += 1) {
+      if (entries[i].type !== 'item') continue;
+      const prev = entries[i - 1];
+      const dur = (prev?.type === 'title' ? (durs[i - 1] || 0) : 0) + (durs[i] || 0);
+      segs.push({ label: entries[i].label, dur });
+    }
+
+    const segTotal = segs.reduce((sum, s) => sum + s.dur, 0) || 1;
+    await overlayProgressBar({
+      videoPath: tmpConcat,
+      outPath: built,
+      labels: segs.map((s) => s.label),
+      ratios: segs.map((s) => s.dur / segTotal),
+      cfg,
+      tmpDir,
+    });
   }
 
-  const durs = [];
-  for (const e of entries) durs.push(await probeDuration(e.path));
-
-  // 每段 = 前面的 title（若有）+ item，占比按时长算
-  const segs = [];
-  for (let i = 0; i < entries.length; i += 1) {
-    if (entries[i].type !== 'item') continue;
-    const prev = entries[i - 1];
-    const dur = (prev?.type === 'title' ? (durs[i - 1] || 0) : 0) + (durs[i] || 0);
-    segs.push({ label: entries[i].label, dur });
-  }
-
-  const segTotal = segs.reduce((sum, s) => sum + s.dur, 0) || 1;
-  await overlayProgressBar({
-    videoPath: tmpConcat,
-    outPath,
-    labels: segs.map((s) => s.label),
-    ratios: segs.map((s) => s.dur / segTotal),
-    cfg,
-    tmpDir,
-  });
+  // 先落缓存再复制到导出目录：同配置下次导出毫秒级命中
+  await fsp.mkdir(VIDEO_CACHE_DIR, { recursive: true });
+  await fsp.copyFile(built, cachePath);
+  await fsp.copyFile(cachePath, outPath);
 }
 
 /**
@@ -999,14 +1008,14 @@ export function buildGalleryClipArgs({ seq, stillByIndex, transByPair, hold, tra
  * 渲染画册条目的全部帧：每个唯一 index 的停留帧 + 每个唯一 (from,to) 方向的过渡帧。
  * 帧只依赖画面内容，与音频无关，因此可以跨不同音频复用。
  */
-async function renderGalleryFrames({ images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, progressSvg, fps }) {
+async function renderGalleryFrames({ images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, fps }) {
   const n = images.length;
 
   // 停留帧：每个唯一 index 渲染一次，来回循环时复用
   const stillByIndex = new Map();
   for (let i = 0; i < n; i += 1) {
     const frame = path.join(tmpDir, `${base}-still-${i}.jpg`);
-    await renderGalleryStill(frame, { layout, images, aspects, activeIndex: i, burnText, fontFamily, text, progressSvg });
+    await renderGalleryStill(frame, { layout, images, aspects, activeIndex: i, burnText, fontFamily, text });
     stillByIndex.set(i, frame);
   }
 
@@ -1026,7 +1035,7 @@ async function renderGalleryFrames({ images, aspects, layout, timeline, base, tm
     for (let j = 0; j < tframes; j += 1) {
       const t = tframes === 1 ? 1 : j / (tframes - 1);
       const framePath = path.join(tmpDir, `${base}-trans-${from}-${to}-${String(j).padStart(3, '0')}.jpg`);
-      await renderGalleryTransition(framePath, { layout, images, aspects, fromIndex: from, toIndex: to, t, progressSvg, burnText, fontFamily, text });
+      await renderGalleryTransition(framePath, { layout, images, aspects, fromIndex: from, toIndex: to, t, burnText, fontFamily, text });
     }
     transByPair.set(key, pattern);
   }
@@ -1038,7 +1047,7 @@ async function renderGalleryFrames({ images, aspects, layout, timeline, base, tm
  * 生成（或复用）「无音频视频轨」：时长等于保底时长（每张图完整展示一遍），
  * 不依赖任何音频，因此切换 TTS 语音 / 录音时可复用，只需重新合并音频。
  */
-async function ensureVideoTrack({ images, aspects, layout, text, cfg, progressSvg, minFull, videoKey, cacheDir, tmpDir }) {
+async function ensureVideoTrack({ images, aspects, layout, text, cfg, minFull, videoKey, cacheDir, tmpDir }) {
   const { fps, secondsPerImage, transSeconds, burnText, fontFamily } = cfg;
   const videoCachePath = path.join(cacheDir, `${videoKey}.v.mp4`);
 
@@ -1060,7 +1069,7 @@ async function ensureVideoTrack({ images, aspects, layout, text, cfg, progressSv
 
   const base = `v-${videoKey.slice(0, 12)}`;
   const { stillByIndex, transByPair } = await renderGalleryFrames({
-    images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, progressSvg, fps,
+    images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, fps,
   });
   const args = buildGalleryClipArgs({
     seq: timeline.seq,
@@ -1081,7 +1090,7 @@ async function ensureVideoTrack({ images, aspects, layout, text, cfg, progressSv
  * 单图：全屏停留；多图：画册（大图 + 底部缩略图 swiper + 计数），大图来回循环滑动。
  * 返回缓存文件路径；命中缓存时不重新渲染帧。
  */
-async function buildItemClip({ images, imageRels, text, title, audio, audioRel, audioDuration, cfg, tmpDir, cacheDir, progress = null }) {
+async function buildItemClip({ images, imageRels, text, title, audio, audioRel, audioDuration, cfg, tmpDir, cacheDir }) {
   const { width, height, fps, secondsPerImage, transSeconds, burnText, fontFamily } = cfg;
   const n = images.length;
 
@@ -1089,7 +1098,7 @@ async function buildItemClip({ images, imageRels, text, title, audio, audioRel, 
   const imageSigs = [];
   for (const absPath of images) imageSigs.push(await fileSig(absPath));
   const audioSig = audio ? await fileSig(audio) : null;
-  const key = itemCacheKey({ imageRels, imageSigs, text, title, audioRel, audioSig, cfg, progress });
+  const key = itemCacheKey({ imageRels, imageSigs, text, title, audioRel, audioSig, cfg });
   const cachePath = path.join(cacheDir, `${key}.mp4`);
 
   if (fs.existsSync(cachePath)) {
@@ -1103,17 +1112,6 @@ async function buildItemClip({ images, imageRels, text, title, audio, audioRel, 
   const audioPath = audio || null;
   const hasAudio = Boolean(audioPath);
   const probed = hasAudio ? await probeDuration(audioPath) : null;
-
-  // 章节/合集视频的顶部进度条 overlay
-  const progressSvg = progress && progress.labels.length > 1
-    ? await sharp(Buffer.from(buildProgressBar({
-        width,
-        height,
-        labels: progress.labels,
-        activeIndex: progress.activeIndex,
-        fontFamily,
-      }))).png().toBuffer()
-    : null;
 
   // 先算「无音频」时间线：单图/多图分支判断 + 拿到 clamp 后的 hold/trans
   const timelineNoAudio = computeGalleryTimeline({
@@ -1137,7 +1135,7 @@ async function buildItemClip({ images, imageRels, text, title, audio, audioRel, 
         })
       : timelineNoAudio;
     const frame = path.join(tmpDir, `${base}-frame.jpg`);
-    await renderFrame(images[0], frame, { width, height, burnText, fontFamily, text, progressSvg });
+    await renderFrame(images[0], frame, { width, height, burnText, fontFamily, text });
     const args = buildClipArgs({ framePaths: [frame], audioPath, total: timeline.total, seg: timeline.total, fps });
     await runFfmpeg(args, cachePath);
     return cachePath;
@@ -1156,8 +1154,8 @@ async function buildItemClip({ images, imageRels, text, title, audio, audioRel, 
   // 音频短于保底：复用「无音频视频轨」，仅 -c:v copy 合并音频（秒级），不重新渲染帧
   if (hasAudio && probed > 0 && probed <= minFull) {
     const video = await ensureVideoTrack({
-      images, aspects, layout, text, cfg, progressSvg, minFull,
-      videoKey: videoItemCacheKey({ imageRels, imageSigs, text, title, cfg, progress }),
+      images, aspects, layout, text, cfg, minFull,
+      videoKey: videoItemCacheKey({ imageRels, imageSigs, text, title, cfg }),
       cacheDir, tmpDir,
     });
     await muxAudio(video, audioPath, cachePath);
@@ -1178,7 +1176,7 @@ async function buildItemClip({ images, imageRels, text, title, audio, audioRel, 
 
   const base = `item-${key.slice(0, 12)}`;
   const { stillByIndex, transByPair } = await renderGalleryFrames({
-    images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, progressSvg, fps,
+    images, aspects, layout, timeline, base, tmpDir, burnText, fontFamily, text, fps,
   });
   const args = buildGalleryClipArgs({
     seq: timeline.seq,
@@ -1199,7 +1197,9 @@ async function buildItemClip({ images, imageRels, text, title, audio, audioRel, 
  * 音效固定，只合成一次，缓存到视频缓存目录。
  */
 async function ensureTransitionAudio(cacheDir) {
-  const outPath = path.join(cacheDir, TITLE_SOUND_FILE);
+  // 文件名带参数哈希：换了音效参数就自动生成新文件，不会复用旧音效
+  const sig = hashStr([RENDER.titleSoundSeconds, RENDER.titleSoundFilter].join('|'));
+  const outPath = path.join(cacheDir, `transition-whoosh-${sig}.m4a`);
   if (fs.existsSync(outPath)) {
     const stat = await fsp.stat(outPath).catch(() => null);
     if (stat && stat.size > 0) return outPath;
@@ -1208,8 +1208,8 @@ async function ensureTransitionAudio(cacheDir) {
   await runFfmpeg(
     [
       '-y', '-hide_banner', '-loglevel', 'error',
-      '-f', 'lavfi', '-i', `anoisesrc=color=pink:duration=${TITLE_SOUND_SECONDS}:sample_rate=44100`,
-      '-af', 'highpass=f=350,lowpass=f=2600,volume=0.35,afade=t=in:st=0:d=0.08,afade=t=out:st=0.28:d=0.12',
+      '-f', 'lavfi', '-i', `anoisesrc=color=pink:duration=${RENDER.titleSoundSeconds}:sample_rate=44100`,
+      '-af', RENDER.titleSoundFilter,
       '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
     ],
     outPath,
@@ -1245,7 +1245,7 @@ async function buildTitleClip({ title, subtitle, cfg, tmpDir, cacheDir }) {
 
   // 标题过渡带一个轻切换音效；音效短于标题时长，末尾自动补静音
   const soundPath = await ensureTransitionAudio(cacheDir);
-  const args = buildClipArgs({ framePaths: [frame], audioPath: soundPath, total: TITLE_CARD_SECONDS, seg: TITLE_CARD_SECONDS, fps });
+  const args = buildClipArgs({ framePaths: [frame], audioPath: soundPath, total: RENDER.titleCardSeconds, seg: RENDER.titleCardSeconds, fps });
   await runFfmpeg(args, cachePath);
   return cachePath;
 }
@@ -1269,6 +1269,8 @@ export async function buildVideos({ state, config: configOverride, mode: modeInp
   const baseCfg = configOverride ?? VIDEO;
   // 前端可覆盖音频来源；非法值回退到配置默认
   const source = ['auto', 'recording', 'tts'].includes(audioSource) ? audioSource : baseCfg.audioSource;
+  // TODO(视频开关)：字幕/进度条开关暂未接到前端。接线时在这里按 audioSource 的写法
+  // 校验请求体并覆盖 cfg.burnText / cfg.progressBar —— 两个值都已在缓存签名里。
   const cfg = { ...baseCfg, audioSource: source };
 
   const single = itemId ? findItemWithSection(state, itemId) : null;
@@ -1372,8 +1374,7 @@ export async function buildVideos({ state, config: configOverride, mode: modeInp
       const step = { i: gi + 1, total: renderables.length, label: r.progressLabel, section: r.section.name };
       log.video.info(step, '生成条目视频');
 
-      // 章节/合集的进度条改为拼接完成后整段叠加，item clip 不再烧录静态进度条，
-      // 这样 item 缓存也不再依赖 progress，切换进度条样式时无需重渲染
+      // 进度条在章节拼接完成后整段叠加，item clip 不含进度条，缓存也不依赖它
       const clipPath = await buildItemClip({
         images: r.imagePaths,
         imageRels: r.imageRels,
@@ -1385,7 +1386,6 @@ export async function buildVideos({ state, config: configOverride, mode: modeInp
         cfg,
         tmpDir,
         cacheDir: VIDEO_CACHE_DIR,
-        progress: null,
       });
       log.video.info(step, '条目视频完成');
 

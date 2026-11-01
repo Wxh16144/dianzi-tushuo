@@ -44,7 +44,7 @@ describe('纯函数', () => {
     assert.deepEqual(video.captionLines('   '), []);
   });
 
-  test('itemCacheKey：内容/配置/进度条变化会改变 key，相同输入稳定', () => {
+  test('itemCacheKey：内容/配置变化会改变 key，相同输入稳定', () => {
     const cfg = { width: 1080, height: 1920, fps: 25, secondsPerImage: 2, transSeconds: 0.5, burnText: true, fontFamily: 'Arial' };
     const base = {
       imageRels: ['images/a.jpg', 'images/b.jpg'],
@@ -54,7 +54,6 @@ describe('纯函数', () => {
       audioRel: 'audio/a.mp3',
       audioSig: '300:3',
       cfg,
-      progress: { labels: ['背景板', '花艺'], activeIndex: 0 },
     };
 
     const k1 = video.itemCacheKey(base);
@@ -74,10 +73,11 @@ describe('纯函数', () => {
     assert.notEqual(video.itemCacheKey({ ...base, audioRel: 'audio/b.mp3' }), k1);
     // 配置变了 key 变
     assert.notEqual(video.itemCacheKey({ ...base, cfg: { ...cfg, secondsPerImage: 5 } }), k1);
-    // 进度条变了 key 变（不同位置/内容）
-    assert.notEqual(video.itemCacheKey({ ...base, progress: { labels: ['背景板', '花艺'], activeIndex: 1 } }), k1);
-    // 无进度条 vs 有进度条不同
-    assert.notEqual(video.itemCacheKey({ ...base, progress: null }), k1);
+    // 字幕开关改变输出画面，key 必须变
+    assert.notEqual(video.itemCacheKey({ ...base, cfg: { ...cfg, burnText: false } }), k1);
+    // 音频来源/语音改变音轨，key 必须变
+    assert.notEqual(video.itemCacheKey({ ...base, cfg: { ...cfg, audioSource: 'tts' } }), k1);
+    assert.notEqual(video.itemCacheKey({ ...base, cfg: { ...cfg, ttsVoice: 'Meijia' } }), k1);
   });
 
   test('titleCacheKey：标题/副标题/配置决定 key', () => {
@@ -86,6 +86,36 @@ describe('纯函数', () => {
     assert.equal(video.titleCacheKey({ title: '背景板', subtitle: '主舞台', cfg }), k1);
     assert.notEqual(video.titleCacheKey({ title: '花艺', subtitle: '主舞台', cfg }), k1);
     assert.notEqual(video.titleCacheKey({ title: '背景板', subtitle: '迎宾区', cfg }), k1);
+    assert.notEqual(video.titleCacheKey({ title: '背景板', subtitle: '主舞台', cfg: { ...cfg, fontFamily: 'SimHei' } }), k1);
+  });
+
+  test('chapterCacheKey：条目身份/顺序/标签/进度条开关决定 key', () => {
+    const cfg = { width: 1080, height: 1920, fps: 25, secondsPerImage: 2, transSeconds: 0.5, burnText: true, fontFamily: 'Arial', progressBar: true };
+    const entries = [
+      { type: 'title', path: '/cache/aaa.mp4' },
+      { type: 'item', path: '/cache/bbb.mp4', label: '背景板' },
+      { type: 'title', path: '/cache/ccc.mp4' },
+      { type: 'item', path: '/cache/ddd.mp4', label: '花艺' },
+    ];
+
+    const k1 = video.chapterCacheKey({ entries, cfg });
+    assert.match(k1, /^[0-9a-f]{20}$/);
+    assert.equal(video.chapterCacheKey({ entries, cfg }), k1, '相同输入应稳定');
+
+    // 顺序变了 → 成品不同
+    assert.notEqual(video.chapterCacheKey({ entries: [...entries].reverse(), cfg }), k1);
+    // 标签变了 → 进度条文字不同
+    const relabeled = entries.map((e) => (e.type === 'item' && e.label === '花艺' ? { ...e, label: '花艺布置' } : e));
+    assert.notEqual(video.chapterCacheKey({ entries: relabeled, cfg }), k1);
+    // 关掉进度条 → 成品不同
+    assert.notEqual(video.chapterCacheKey({ entries, cfg: { ...cfg, progressBar: false } }), k1);
+    // 单条目时进度条开关不影响成品，key 应一致
+    const single = [{ type: 'item', path: '/cache/bbb.mp4', label: '背景板' }];
+    assert.equal(
+      video.chapterCacheKey({ entries: single, cfg }),
+      video.chapterCacheKey({ entries: single, cfg: { ...cfg, progressBar: false } }),
+      '单条目不叠进度条，开关不应影响 key',
+    );
   });
 
   test('videoItemCacheKey：与音频解耦，音频/语音变化不变，画面变化才变', () => {
@@ -99,7 +129,6 @@ describe('纯函数', () => {
       text: '背景板',
       title: '背景板',
       cfg,
-      progress: { labels: ['背景板', '花艺'], activeIndex: 0 },
     };
 
     const k1 = video.videoItemCacheKey(base);
@@ -115,7 +144,7 @@ describe('纯函数', () => {
     assert.notEqual(video.videoItemCacheKey({ ...base, title: '改了' }), k1);
     assert.notEqual(video.videoItemCacheKey({ ...base, imageSigs: ['100:1', '999:2'] }), k1);
     assert.notEqual(video.videoItemCacheKey({ ...base, cfg: { ...cfg, secondsPerImage: 5 } }), k1);
-    assert.notEqual(video.videoItemCacheKey({ ...base, progress: { labels: ['背景板', '花艺'], activeIndex: 1 } }), k1);
+    assert.notEqual(video.videoItemCacheKey({ ...base, cfg: { ...cfg, burnText: false } }), k1, '字幕开关影响画面');
   });
 
   test('buildCaptionSvg：有文字生成 SVG，空文字或超长返回 null', () => {
@@ -281,19 +310,6 @@ describe('纯函数', () => {
     assert.ok(!name.includes('/'), `文件名不应含路径分隔符：${name}`);
   });
 
-  test('buildProgressBar：单段返回 null，多段斑马纹 + 当前段高亮', () => {
-    assert.equal(video.buildProgressBar({ width: 1080, height: 1920, labels: ['A'], activeIndex: 0, fontFamily: 'Arial' }), null);
-
-    const svg = video.buildProgressBar({ width: 1080, height: 1920, labels: ['01', '02', '03'], activeIndex: 1, fontFamily: 'Arial' });
-    assert.ok(svg);
-    assert.match(svg, /<svg/);
-    assert.match(svg, /01/);
-    assert.match(svg, /02/);
-    assert.match(svg, /03/);
-    assert.ok(svg.includes('#2f6df6'), '当前段应使用高亮色');
-    assert.equal((svg.match(/<rect/g) || []).length, 3, '应有 3 个分段');
-  });
-
   test('buildProgressTrack：单段返回 null，段宽按时长占比、斑马纹区分，且不含文字', () => {
     assert.equal(video.buildProgressTrack({ width: 1080, height: 1920, labels: ['A'], ratios: [1] }), null);
 
@@ -360,6 +376,8 @@ describe('纯函数', () => {
     const withAudio = video.buildClipArgs({ framePaths: ['/tmp/a.jpg'], audioPath: '/tmp/a.mp3', total: 2, seg: 2, fps: 25 });
     assert.ok(withAudio.includes('/tmp/a.mp3'));
     assert.ok(!withAudio.some((a) => String(a).includes('anullsrc')));
+    // 音轨必须补齐到视频长度，否则 concat -c copy 会在接缝处留下音频空洞
+    assert.ok(withAudio.includes('apad'), '有音频时必须 apad 补齐');
   });
 
   test('resolveVideoConfig：默认值与边界夹取', () => {
@@ -376,6 +394,8 @@ describe('纯函数', () => {
     assert.equal(clamped.secondsPerImage, 0.5);
 
     assert.equal(config.resolveVideoConfig({ burnText: false }).burnText, false);
+    assert.equal(cfg.progressBar, true, '进度条默认开启');
+    assert.equal(config.resolveVideoConfig({ progressBar: false }).progressBar, false);
     assert.equal(config.resolveVideoConfig({ fontFamily: 'SimHei' }).fontFamily, 'SimHei');
 
     // 音频来源与 TTS 语音默认值
@@ -456,8 +476,8 @@ describe('buildVideos（真实 ffmpeg）', () => {
     }
 
     // 标题过渡带轻切换音效：音效缓存存在，章节视频开头有声音（非全静音）
-    const sound = path.join(config.VIDEO_CACHE_DIR, 'transition-whoosh.m4a');
-    assert.ok((await fs.stat(sound).catch(() => null))?.size > 0, '应生成标题切换音效缓存');
+    const sounds = (await fs.readdir(config.VIDEO_CACHE_DIR)).filter((n) => /^transition-whoosh-[0-9a-f]{20}\.m4a$/.test(n));
+    assert.equal(sounds.length, 1, `应生成一份参数化命名的切换音效：${sounds.join(', ')}`);
 
     const firstOut = path.join(config.EXPORTS_DIR, 'videos', result.files[0].name);
     const vol = await execa(config.BIN.ffmpeg, ['-i', firstOut, '-af', 'volumedetect', '-f', 'null', '-']);
@@ -731,5 +751,116 @@ describe('buildVideos（真实 ffmpeg）', () => {
     ]);
     const duration = Number.parseFloat(stdout);
     assert.ok(Math.abs(duration - 3.8) < 0.6, `时长应为约 3.8s（含标题过渡），实际 ${duration}`);
+  });
+});
+
+describe('音画对齐（真实 ffmpeg）', () => {
+  const cfg = {
+    width: 320, height: 568, fps: 10, secondsPerImage: 1, transSeconds: 0.5,
+    burnText: true, fontFamily: 'Arial', audioSource: 'recording', ttsVoice: 'Tingting', progressBar: true,
+  };
+
+  /** 返回音频包相邻间隔里超过阈值的空洞 */
+  const audioHoles = async (file, threshold = 0.06) => {
+    const { stdout } = await execa(config.BIN.ffprobe, [
+      '-v', 'error', '-select_streams', 'a', '-show_entries', 'packet=pts_time', '-of', 'json', file,
+    ]);
+    const pts = JSON.parse(stdout).packets.map((p) => Number(p.pts_time)).filter(Number.isFinite).sort((x, y) => x - y);
+    const holes = [];
+    for (let i = 1; i < pts.length; i += 1) {
+      const gap = pts[i] - pts[i - 1];
+      if (gap > threshold) holes.push({ at: Number(pts[i - 1].toFixed(3)), gap: Number(gap.toFixed(3)) });
+    }
+    return { holes, span: pts.length ? Number((pts.at(-1) - pts[0]).toFixed(3)) : 0 };
+  };
+
+  const streamDurations = async (file) => {
+    const { stdout } = await execa(config.BIN.ffprobe, [
+      '-v', 'error', '-show_entries', 'stream=codec_type,duration', '-of', 'csv=p=0', file,
+    ]);
+    const out = {};
+    for (const line of stdout.trim().split('\n')) {
+      const [type, dur] = line.split(',');
+      out[type] = Number(dur);
+    }
+    return out;
+  };
+
+  test('章节成品：音轨无空洞，且时长与视频一致', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const a = await media.processImage(await makeImage({ width: 400, height: 300 }), { sectionSeq: 21, itemSeq: 1 });
+    const b = await media.processImage(await makeImage({ width: 300, height: 400, color: { r: 20, g: 160, b: 90 } }), { sectionSeq: 21, itemSeq: 2 });
+
+    const state = {
+      title: '对齐测试',
+      sections: [
+        {
+          seq: 1,
+          name: '主舞台',
+          items: [
+            { seq: 1, title: '背景板', text: '背景板：香槟金', images: [a], audio: null },
+            { seq: 2, title: '花艺', text: '两侧花艺', images: [b], audio: null },
+          ],
+        },
+      ],
+    };
+
+    const result = await video.buildVideos({ state, config: cfg, mode: 'sections' });
+    const onDisk = path.join(config.EXPORTS_DIR, 'videos', result.files[0].name);
+
+    const { holes, span } = await audioHoles(onDisk);
+    assert.deepEqual(holes, [], `章节成品音频不应有空洞，实际：${JSON.stringify(holes)}`);
+
+    const durs = await streamDurations(onDisk);
+    assert.ok(Math.abs(durs.video - durs.audio) < 0.1, `音视频时长应对齐：video=${durs.video} audio=${durs.audio}`);
+
+    // 音频内容（每包 1024 样本 @44.1k）不应明显短于时间轴
+    const { stdout } = await execa(config.BIN.ffprobe, [
+      '-v', 'error', '-select_streams', 'a', '-show_entries', 'packet=pts_time', '-of', 'json', onDisk,
+    ]);
+    const packets = JSON.parse(stdout).packets.length;
+    const contentSeconds = (packets * 1024) / 44100;
+    assert.ok(Math.abs(contentSeconds - span) < 0.2, `音频内容 ${contentSeconds.toFixed(2)}s 与时间轴 ${span}s 偏差过大`);
+  });
+
+  test('章节成品缓存：同配置二次导出命中，不再重编码', async (t) => {
+    if (skipReason) return t.skip(skipReason);
+
+    const a = await media.processImage(await makeImage({ width: 400, height: 300 }), { sectionSeq: 22, itemSeq: 1 });
+    const b = await media.processImage(await makeImage({ width: 300, height: 400 }), { sectionSeq: 22, itemSeq: 2 });
+    const state = {
+      title: '缓存测试',
+      sections: [
+        {
+          seq: 1,
+          name: '主舞台',
+          items: [
+            { seq: 1, title: '背景板', text: '背景板', images: [a], audio: null },
+            { seq: 2, title: '花艺', text: '花艺', images: [b], audio: null },
+          ],
+        },
+      ],
+    };
+
+    const beforeKeys = new Set(
+      (await fs.readdir(config.VIDEO_CACHE_DIR)).filter((n) => n.endsWith('.ch.mp4')),
+    );
+
+    const first = await video.buildVideos({ state, config: cfg, mode: 'sections' });
+    const created = (await fs.readdir(config.VIDEO_CACHE_DIR))
+      .filter((n) => n.endsWith('.ch.mp4') && !beforeKeys.has(n));
+    assert.equal(created.length, 1, `本次导出应新增一份章节成品缓存：${created.join(', ')}`);
+
+    const cachePath = path.join(config.VIDEO_CACHE_DIR, created[0]);
+    const before = (await fs.stat(cachePath)).mtimeMs;
+
+    // 删掉导出文件，确保第二次必须重新复制
+    await fs.rm(path.join(config.EXPORTS_DIR, 'videos', first.files[0].name), { force: true });
+    const second = await video.buildVideos({ state, config: cfg, mode: 'sections' });
+
+    const after = (await fs.stat(cachePath)).mtimeMs;
+    assert.equal(after, before, '二次导出应命中缓存，不重写缓存文件');
+    assert.ok((await fs.stat(path.join(config.EXPORTS_DIR, 'videos', second.files[0].name))).size > 0, '导出文件应被重新生成');
   });
 });

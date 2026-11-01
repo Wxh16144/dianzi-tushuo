@@ -24,6 +24,8 @@ router.get('/health', (req, res) => {
       ttsVoice: VIDEO_TTS_VOICE,
       secondsPerImage: VIDEO.secondsPerImage,
       transSeconds: VIDEO.transSeconds,
+      burnText: VIDEO.burnText,
+      progressBar: VIDEO.progressBar,
     },
     stt: { ready: sttReady(), engine: 'mlx-whisper' },
     llm: LLM.publicInfo,
