@@ -10,7 +10,7 @@
 
 下面这条视频就是用它自己生成的（截图 + 配音 + 文案字幕，自动合成）：
 
-https://github.com/user-attachments/assets/1a207ff9-dd46-4e12-bd8d-f4476ff10cfc
+https://github.com/user-attachments/assets/73f105b5-2f9f-4a01-99ae-3bb90bf36fae
 
 ## 快速开始
 
