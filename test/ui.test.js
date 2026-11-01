@@ -112,7 +112,7 @@ describe('编辑模式', () => {
 
     // 顶栏按「工作区 / 撤销重做 / 预览 / 导出 / 备份恢复 / 清空」分区，不再有「导出视频」
     assert.equal(view.actionGroups, 6, '顶栏应分成 6 个区');
-    for (const label of ['打开文件夹', '撤销', '重做', '预览', '导出 PDF', '导出 Zip', '导入', '清空']) {
+    for (const label of ['打开工作区', '撤销', '重做', '预览', '导出 PDF', '导出 Zip', '导入', '清空']) {
       assert.ok(view.topbarButtons.includes(label), `顶栏缺少「${label}」`);
     }
     assert.ok(!view.topbarButtons.includes('导出视频'), '顶栏不应再放「导出视频」');
