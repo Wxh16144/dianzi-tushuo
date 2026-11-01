@@ -30,13 +30,13 @@ router.post('/audio/transcribe', async (req, res) => {
   let description = null;
   let llmError = null;
   let describeMs = 0;
-  let describeCached = false;
+  let wasCached = false;
 
   try {
     const result = await describeCached(sttResult.text);
     description = result?.text ?? null;
     describeMs = result?.ms ?? 0;
-    describeCached = Boolean(result?.cached);
+    wasCached = Boolean(result?.cached);
   } catch (err) {
     llmError = err.message;
     log.llm.warn({ err: err.message }, '生成描述失败（不影响转写）');
@@ -47,7 +47,7 @@ router.post('/audio/transcribe', async (req, res) => {
     transcribeMs: sttResult.ms,
     transcribeCached: Boolean(sttResult.cached),
     describeMs,
-    describeCached,
+    describeCached: wasCached,
     totalMs: Date.now() - started,
     downloaded: Boolean(sttResult.downloaded),
     audioSeconds,
