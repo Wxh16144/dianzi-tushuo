@@ -8,9 +8,9 @@
 
 ## Demo
 
-下面这条视频就是用它自己生成的（截图 + 配音 + 文案字幕，自动合成）：
+下面这条视频就是用它自己生成的（截图 + 配音 + 文案字幕，自动合成）。点击图片查看演示：
 
-<video controls width="100%" poster="docs/demo/demo-poster.png" src="./docs/demo/demo.mp4"></video>
+[![Demo 演示视频](docs/demo/demo-cover.png)](docs/demo/demo.mp4)
 
 ## 快速开始
 
