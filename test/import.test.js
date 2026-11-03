@@ -78,6 +78,22 @@ describe('importBackup', () => {
     assert.equal(await fs.readFile(onDisk, 'utf8'), 'fake-png-bytes');
   });
 
+  test('媒体目录不存在时自动创建，不报 ENOENT', async () => {
+    const buffer = makeZip({
+      'manifest.json': JSON.stringify(manifest()),
+      'state.json': JSON.stringify(state()),
+      'images/pic.png': Buffer.from('fake-png-bytes'),
+    });
+
+    // 模拟工作区目录被手动删掉（或用 --workdir 指到新目录）
+    await fs.rm(box.config.IMAGES_DIR, { recursive: true, force: true });
+    await fs.rm(box.config.AUDIO_DIR, { recursive: true, force: true });
+
+    const result = await importBackup(buffer);
+    assert.equal(result.ok, true);
+    assert.equal(await fs.readFile(path.join(box.config.IMAGES_DIR, 'pic.png'), 'utf8'), 'fake-png-bytes');
+  });
+
   test('缺失媒体记入 missing，不拒绝整包', async () => {
     const ghostState = () => ({
       ...state(),

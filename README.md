@@ -10,7 +10,10 @@
 
 下面这条视频就是用它自己生成的（截图 + 配音 + 文案字幕，自动合成）：
 
-https://github.com/user-attachments/assets/73f105b5-2f9f-4a01-99ae-3bb90bf36fae
+<a href="https://github.com/Wxh16144/dianzi-tushuo/releases/download/v1.0.0/demo.mp4"><img src="docs/demo/poster.jpg" width="320" alt="演示视频：用电子图说讲电子图说"></a>
+
+- [看视频（mp4）](https://github.com/Wxh16144/dianzi-tushuo/releases/download/v1.0.0/demo.mp4) · 2 分 38 秒，1080×1920
+- [下载演示备份包（zip）](https://github.com/Wxh16144/dianzi-tushuo/releases/download/v1.0.0/demo-sample.zip) · 导入后就是视频里那份清单，可以自己改
 
 ## 快速开始
 

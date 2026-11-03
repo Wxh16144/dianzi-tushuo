@@ -3,7 +3,7 @@ import path from 'node:path';
 import createError from 'http-errors';
 import AdmZip from 'adm-zip';
 import { AUDIO_DIR, IMAGES_DIR } from './config.js';
-import { setState } from './db.js';
+import { setState, ensureDirs } from './db.js';
 import { parseState, BACKUP_FORMAT, BACKUP_FORMAT_VERSION, CURRENT_STATE_VERSION, LEGACY_BACKUP_FORMATS } from './schema.js';
 import { log } from './logger.js';
 
@@ -105,6 +105,8 @@ export async function importBackup(buffer) {
   const missing = [...referenced].filter((rel) => !present.has(rel));
 
   // 先落盘媒体，再整体替换 state
+  // 目录可能被手动删掉或从没生成过（例如换了工作区），写之前先确保存在
+  await ensureDirs();
   for (const { kind, base, data } of mediaEntries) {
     const target = path.join(kind === 'images' ? IMAGES_DIR : AUDIO_DIR, base);
     await fsp.writeFile(target, data);
